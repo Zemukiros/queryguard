@@ -1,0 +1,21 @@
+[project]
+name = "queryguard"
+version = "0.1.0"
+description = "Text-to-SQL with a hard read-only database boundary"
+requires-python = "==3.12.*"
+dependencies = [
+    "sqlalchemy",
+    "psycopg[binary]",
+    "anthropic",
+    "fastapi",
+    "uvicorn",
+    "sqlparse",
+    "pandas",
+    "python-dotenv",
+    "pydantic",
+    "pytest",
+]
+
+[tool.uv]
+# No importable package yet — this is a virtual project.
+package = false

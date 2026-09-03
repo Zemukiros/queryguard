@@ -1,0 +1,27 @@
+services:
+  db:
+    image: postgres:16
+    container_name: queryguard-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-queryguard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-queryguard}
+      # Consumed by db/init/03_readonly_user.sql via psql \getenv.
+      POSTGRES_RO_PASSWORD: ${POSTGRES_RO_PASSWORD:-changeme}
+    ports:
+      - "5432:5432"
+    volumes:
+      # Named volume: data survives `docker compose restart` and `down`.
+      - pgdata:/var/lib/postgresql/data
+      # Run once, on first start only (empty data dir).
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  pgdata:
