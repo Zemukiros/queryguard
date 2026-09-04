@@ -24,3 +24,6 @@ logs/
 
 # Regenerable introspection artifact, derived from the local database.
 schema_cache.json
+
+# LLM call logs — may contain question text and cost data.
+logs/
