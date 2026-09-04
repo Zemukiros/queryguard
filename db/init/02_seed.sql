@@ -8,6 +8,12 @@
 
 BEGIN;
 
+-- Deterministic clock. setseed() fixes the random draws; the DATE '2026-09-03'
+-- anchor below fixes the dates, so a rebuild on any future day reproduces
+-- byte-identical data -- which is what the eval suite's expected answers rely on.
+-- TimeZone is pinned too, so the anchor means the same instant on any host.
+SET TimeZone = 'UTC';
+
 SELECT setseed(0.42);
 
 -- ---------------------------------------------------------------- categories
@@ -24,6 +30,10 @@ INSERT INTO categories (name, slug, description, parent_category_id, is_active) 
     ('Footwear',         'footwear',         NULL,                                    3, true),
     ('Camping',          'camping',          'Tents, packs and sleeping bags',        4, true),
     ('Board Games',      'board-games',      NULL,                                    6, false);
+
+-- The INSERT above omits created_at, which would take DEFAULT now() and reintroduce
+-- the wall clock. Pin it to the same anchor as every other generated date.
+UPDATE categories SET created_at = DATE '2026-09-03';
 
 -- ----------------------------------------------------------------- customers
 -- 500 customers. #481-500 deliberately never place an order.
@@ -51,7 +61,7 @@ SELECT
               || lpad(floor(s.r_line * 10000)::int::text, 4, '0') END,
     w.countries[s.geo_i],
     CASE WHEN s.r_city < 0.20 THEN NULL ELSE w.cities[s.geo_i] END,
-    now() - (s.r_signup * 1460)::int * interval '1 day',
+    DATE '2026-09-03' - (s.r_signup * 1460)::int * interval '1 day',
     s.r_active >= 0.05,                                        -- ~5% deactivated
     CASE WHEN s.r_optin < 0.25 THEN NULL ELSE s.r_optin2 < 0.6 END,
     NULL                                  -- backfilled from real order totals below
@@ -95,8 +105,8 @@ SELECT
     s.stock > 0,
     s.stock,
     CASE WHEN s.r_disc < 0.08                                  -- ~8% discontinued
-         THEN now() - (s.r_disc_age * 400)::int * interval '1 day' END,
-    now() - (s.r_created * 1500)::int * interval '1 day'
+         THEN DATE '2026-09-03' - (s.r_disc_age * 400)::int * interval '1 day' END,
+    DATE '2026-09-03' - (s.r_created * 1500)::int * interval '1 day'
 FROM (
     SELECT g,
            1 + floor(random() * 12)::int AS adj_i,
@@ -148,7 +158,7 @@ FROM (
     FROM (
         SELECT g,
                1 + floor(random() * 480)::int AS customer_id,  -- #481-500 get none
-               now() - (random() * 1095)::int * interval '1 day'
+               DATE '2026-09-03' - (random() * 1095)::int * interval '1 day'
                      - (random() * 86400)::int * interval '1 second' AS order_date,
                random() AS r_status, random() AS r_addr,  random() AS r_house,
                random() AS r_ship,   random() AS r_gift,  random() AS r_promo,
