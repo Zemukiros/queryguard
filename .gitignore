@@ -21,3 +21,6 @@ logs/
 .DS_Store
 .idea/
 .vscode/
+
+# Regenerable introspection artifact, derived from the local database.
+schema_cache.json
