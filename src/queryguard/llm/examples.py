@@ -24,9 +24,9 @@ EXAMPLES: list[Example] = [
     # 1. Simple single-table lookup. Establishes the baseline shape.
     Example(
         question="What is the email address of customer 42?",
-        sql="SELECT customer_id, email\n"
-        "FROM customers\n"
-        "WHERE customer_id = 42;",
+        sql="SELECT c.customer_id, c.email\n"
+        "FROM customers AS c\n"
+        "WHERE c.customer_id = 42;",
     ),
     # 2. Two-table join. Explicit JOIN ... ON, aliased, never a comma join.
     Example(
@@ -55,9 +55,9 @@ EXAMPLES: list[Example] = [
     Example(
         question="How many orders were placed in the first quarter of 2026?",
         sql="SELECT count(*) AS order_count\n"
-        "FROM orders\n"
-        "WHERE order_date >= DATE '2026-01-01'\n"
-        "  AND order_date <  DATE '2026-04-01';",
+        "FROM orders AS o\n"
+        "WHERE o.order_date >= DATE '2026-01-01'\n"
+        "  AND o.order_date <  DATE '2026-04-01';",
     ),
     # 5. Cancelled orders must be excluded. Deliberately an AVERAGE, not a sum:
     #    cancelled orders carry total_amount = 0, so on a SUM the filter is
