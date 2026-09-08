@@ -74,6 +74,20 @@ EXAMPLES: list[Example] = [
         "GROUP BY c.country\n"
         "ORDER BY avg_order_value DESC;",
     ),
+    # 6. A CTE joined back to a table with an explicit JOIN ... ON. Added after
+    #    a live run answered "revenue last quarter" with `FROM orders AS o,
+    #    bounds AS b` -- the no-comma-join rule held on every shape the examples
+    #    demonstrated and broke on the one shape none of them did.
+    Example(
+        question="Which 5 products sold the most units?",
+        sql="WITH product_units AS (\n"
+        "    SELECT oi.product_id, sum(oi.quantity) AS units\n"
+        "    FROM order_items AS oi GROUP BY oi.product_id\n"
+        ")\n"
+        "SELECT p.name, u.units\n"
+        "FROM product_units AS u JOIN products AS p ON p.product_id = u.product_id\n"
+        "ORDER BY u.units DESC LIMIT 5;",
+    ),
 ]
 
 

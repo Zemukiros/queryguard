@@ -51,13 +51,16 @@ class ModelPricing:
 
 PRICING: dict[str, ModelPricing] = {
     "claude-sonnet-5": ModelPricing(input_usd_per_mtok=2.00, output_usd_per_mtok=10.00),
-    # The minimum cacheable prefix is per-model: 1024 tokens on Sonnet 5, but
-    # 4096 on Haiku 4.5. build_system_blocks() marks a prefix of roughly 2.5k
-    # tokens, which clears Sonnet's floor and falls well short of Haiku's -- so
-    # selecting Haiku (generate.py exposes --model) makes the cache_control
-    # marker a silent no-op: no error, no cache entry, every call billed at the
-    # full input rate. _warn_if_cache_was_ignored() catches that on the first
-    # response rather than leaving it to be noticed on the bill.
+    # The minimum cacheable prefix is per-model: 1024 tokens on Sonnet 5, 4096
+    # on Haiku 4.5. build_system_blocks() marks 4,953 tokens -- measured on a
+    # live call, not estimated from character count, which understates it by
+    # about half because the schema block tokenizes at roughly 2 chars/token.
+    # So the prefix clears Haiku's floor as well, but by only ~21%, and the
+    # schema block is most of it: introspect a smaller database, or profile
+    # fewer columns, and the prefix slips under 4096 while still caching on
+    # Sonnet. That failure is silent -- no error, no cache entry, just every
+    # call billed at the full input rate -- which is why the runtime check in
+    # _warn_if_cache_was_ignored() stays even though today's prefix is fine.
     "claude-haiku-4-5": ModelPricing(input_usd_per_mtok=1.00, output_usd_per_mtok=5.00),
 }
 
