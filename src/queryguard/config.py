@@ -67,4 +67,14 @@ def database_url(*, readonly: bool = False) -> URL:
     # psycopg2 — a driver this project does not install. Pin psycopg 3.
     if url.drivername == "postgresql":
         url = url.set(drivername="postgresql+psycopg")
+
+    # Pin the session time zone. Every date column here is timestamptz, and
+    # comparing one against a bare DATE literal resolves the literal in the
+    # *session* time zone -- so "orders in Q1 2026" counts 380 rows on a UTC
+    # host, 382 on Asia/Tokyo and 379 on America/Los_Angeles, with no error to
+    # say the answer moved. libpq's `options` applies the setting at connect
+    # time, so every engine built from this URL is deterministic regardless of
+    # the host's TZ. An `options` already in .env is left alone.
+    if "options" not in url.query:
+        url = url.update_query_dict({"options": "-c timezone=UTC"})
     return url

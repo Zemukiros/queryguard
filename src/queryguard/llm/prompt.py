@@ -1,9 +1,16 @@
 """Assembles the system prompt.
 
-Three blocks, ordered stable-to-volatile: fixed instructions, then the rendered
-schema, then the worked examples. All three are invariant across questions --
-only the user message changes -- so a single cache breakpoint on the last block
-caches the entire prefix.
+Three blocks: fixed instructions, then the rendered schema, then the worked
+examples. That is not stable-to-volatile order. The instructions and the
+examples are module constants; the schema is introspected and changes whenever
+the database does, so the volatile block is the middle one, not the last.
+
+That costs nothing as things stand. All three blocks are invariant across
+questions -- only the user message changes -- and the single breakpoint on the
+last block caches the whole prefix, so re-introspecting the schema invalidates
+that entire prefix whichever slot the schema occupies. The ordering would start
+to matter only if a second breakpoint were added: the schema would then have to
+move last, so that a schema change could not invalidate the blocks ahead of it.
 
 Caching is a prefix match, so the breakpoint goes on block 3 and nowhere else.
 Marking all three would consume three of the four available breakpoints and

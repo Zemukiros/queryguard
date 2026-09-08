@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
@@ -27,6 +28,8 @@ from pathlib import Path
 from typing import Any
 
 from queryguard.config import REPO_ROOT, load_env
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "claude-sonnet-5"
 
@@ -48,6 +51,13 @@ class ModelPricing:
 
 PRICING: dict[str, ModelPricing] = {
     "claude-sonnet-5": ModelPricing(input_usd_per_mtok=2.00, output_usd_per_mtok=10.00),
+    # The minimum cacheable prefix is per-model: 1024 tokens on Sonnet 5, but
+    # 4096 on Haiku 4.5. build_system_blocks() marks a prefix of roughly 2.5k
+    # tokens, which clears Sonnet's floor and falls well short of Haiku's -- so
+    # selecting Haiku (generate.py exposes --model) makes the cache_control
+    # marker a silent no-op: no error, no cache entry, every call billed at the
+    # full input rate. _warn_if_cache_was_ignored() catches that on the first
+    # response rather than leaving it to be noticed on the bill.
     "claude-haiku-4-5": ModelPricing(input_usd_per_mtok=1.00, output_usd_per_mtok=5.00),
 }
 
@@ -119,6 +129,36 @@ def estimate_cost_usd(model: str, usage: Any) -> float:
         * per_input_token
         * CACHE_READ_MULTIPLIER
         + _usage_field(usage, "output_tokens") * per_output_token
+    )
+
+
+def _cache_was_requested(system_blocks: Any) -> bool:
+    """True when at least one system block carries a cache_control marker."""
+    if not isinstance(system_blocks, list):
+        return False
+    return any(isinstance(block, dict) and "cache_control" in block for block in system_blocks)
+
+
+def _warn_if_cache_was_ignored(model: str, system_blocks: Any, usage: Any) -> None:
+    """Warn when a marked prefix neither wrote nor read cache.
+
+    Both counters at zero is the only symptom the API offers: a prefix below the
+    model's minimum cacheable length is not an error, it is silently not cached.
+    The request succeeds, nothing in the response mentions the breakpoint, and
+    the only other evidence is the input bill.
+    """
+    if not _cache_was_requested(system_blocks):
+        return
+    if _usage_field(usage, "cache_creation_input_tokens") or _usage_field(
+        usage, "cache_read_input_tokens"
+    ):
+        return
+
+    logger.warning(
+        "cache_control was set but %s neither wrote nor read cache "
+        "(cache_creation_input_tokens=0, cache_read_input_tokens=0); the marked "
+        "prefix is most likely below this model's minimum cacheable length",
+        model,
     )
 
 
@@ -232,6 +272,7 @@ class LLMClient:
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         usage = message.usage
+        _warn_if_cache_was_ignored(self.model, system_blocks, usage)
         cost = estimate_cost_usd(self.model, usage)
 
         append_log(
