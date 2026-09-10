@@ -16,8 +16,16 @@ from typing import NamedTuple
 
 
 class Example(NamedTuple):
+    """A question and its answer: either one query, or competing readings.
+
+    `interpretations` is (label, sql) pairs. An ambiguous example cannot be
+    expressed as a single `sql` string, and pre-rendering one into that field
+    would hide from render_examples() what the example actually demonstrates.
+    """
+
     question: str
-    sql: str
+    sql: str = ""
+    interpretations: tuple[tuple[str, str], ...] = ()
 
 
 EXAMPLES: list[Example] = [
@@ -88,6 +96,35 @@ EXAMPLES: list[Example] = [
         "FROM product_units AS u JOIN products AS p ON p.product_id = u.product_id\n"
         "ORDER BY u.units DESC LIMIT 5;",
     ),
+    # 7. An ambiguous question. "Active" means either the stored flag or recent
+    #    purchasing, and the schema supports both: is_active is a real column,
+    #    and orders.order_date makes recency computable. Neither reading is
+    #    strained, and they disagree loudly -- 470 rows against 255 -- which is
+    #    the point. A near-identical pair would teach that flagging ambiguity is
+    #    pedantry.
+    #
+    #    Deliberately NOT "revenue last quarter", even though that is the
+    #    canonical ambiguous question here. An example whose question matches
+    #    the one being evaluated teaches recall, not detection, and the
+    #    evaluation then measures nothing.
+    Example(
+        question="How many active customers do we have?",
+        interpretations=(
+            (
+                "flagged_active",
+                "SELECT count(*) AS active_customers\n"
+                "FROM customers AS c\n"
+                "WHERE c.is_active;",
+            ),
+            (
+                "purchased_recently",
+                "SELECT count(DISTINCT o.customer_id) AS active_customers\n"
+                "FROM orders AS o\n"
+                "WHERE o.order_date >= now() - INTERVAL '90 days'\n"
+                "  AND o.status <> 'cancelled';",
+            ),
+        ),
+    ),
 ]
 
 
@@ -95,5 +132,15 @@ def render_examples() -> str:
     """Compact plain-text rendering. No JSON, no markdown fences."""
     parts = ["Worked examples:"]
     for example in EXAMPLES:
-        parts.append(f"\nQ: {example.question}\n{example.sql}")
+        if example.interpretations:
+            readings = "\n".join(
+                f"[{label}]\n{sql}" for label, sql in example.interpretations
+            )
+            parts.append(
+                f"\nQ: {example.question}\n"
+                f"AMBIGUOUS - {len(example.interpretations)} defensible readings, "
+                f"no single query:\n{readings}"
+            )
+        else:
+            parts.append(f"\nQ: {example.question}\n{example.sql}")
     return "\n".join(parts)

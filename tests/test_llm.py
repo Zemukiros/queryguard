@@ -12,12 +12,21 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from queryguard.generate import GeneratedSQL, generate_sql_with_stats
+from queryguard import generate as generate_mod
+from queryguard.generate import (
+    Ambiguity,
+    ClarificationNeeded,
+    GeneratedSQL,
+    Interpretation,
+    _render_clarification,
+    generate_sql_with_stats,
+)
 from queryguard.llm import client as client_mod
 from queryguard.llm.client import (
     CACHE_READ_MULTIPLIER,
     CACHE_WRITE_MULTIPLIER,
     PRICING,
+    CallResult,
     LLMClient,
     RequestCapExceeded,
     estimate_cost_usd,
@@ -93,6 +102,38 @@ def _sample_answer() -> GeneratedSQL:
         tables_used=["orders"],
         columns_used=["orders.status"],
         assumptions=[],
+        ambiguity=Ambiguity(is_ambiguous=False, interpretations=[]),
+    )
+
+
+def _ambiguous_answer() -> GeneratedSQL:
+    """An ambiguous response: no top-level SQL, two competing readings."""
+    return GeneratedSQL(
+        sql="",
+        explanation="'Revenue' can be gross or net of refunds.",
+        confidence=0.0,
+        tables_used=["orders", "refunds"],
+        columns_used=["orders.total_amount", "refunds.amount"],
+        assumptions=[],
+        ambiguity=Ambiguity(
+            is_ambiguous=True,
+            interpretations=[
+                Interpretation(
+                    label="gross_revenue",
+                    sql="SELECT sum(o.total_amount) AS revenue FROM orders AS o;",
+                    explanation="Sums order totals, ignoring refunds.",
+                ),
+                Interpretation(
+                    label="net_of_refunds",
+                    sql=(
+                        "SELECT sum(o.total_amount) - coalesce(sum(r.amount), 0) AS revenue\n"
+                        "FROM orders AS o\n"
+                        "LEFT JOIN refunds AS r ON r.order_id = o.order_id;"
+                    ),
+                    explanation="Gross less refunds issued against those orders.",
+                ),
+            ],
+        ),
     )
 
 
@@ -293,6 +334,7 @@ def test_generated_sql_rejects_malformed_output(field, value) -> None:
         "tables_used": [],
         "columns_used": [],
         "assumptions": [],
+        "ambiguity": {"is_ambiguous": False, "interpretations": []},
     }
     payload[field] = value
     with pytest.raises(ValidationError):
@@ -300,6 +342,8 @@ def test_generated_sql_rejects_malformed_output(field, value) -> None:
 
 
 def test_generated_sql_accepts_a_cte_and_a_commented_select() -> None:
+    unambiguous = Ambiguity(is_ambiguous=False, interpretations=[])
+
     assert GeneratedSQL(
         sql="WITH t AS (SELECT 1 AS n) SELECT n FROM t;",
         explanation="e",
@@ -307,6 +351,7 @@ def test_generated_sql_accepts_a_cte_and_a_commented_select() -> None:
         tables_used=["t"],
         columns_used=["t.n"],
         assumptions=[],
+        ambiguity=unambiguous,
     ).sql.startswith("WITH")
 
     assert "SELECT" in GeneratedSQL(
@@ -316,6 +361,7 @@ def test_generated_sql_accepts_a_cte_and_a_commented_select() -> None:
         tables_used=["orders"],
         columns_used=[],
         assumptions=[],
+        ambiguity=unambiguous,
     ).sql
 
 
@@ -347,3 +393,149 @@ def test_generate_sql_sends_the_expected_request_and_does_not_execute(tmp_path, 
         {"role": "user", "content": "Q: How many orders were cancelled?"}
     ]
     assert len(call["system"]) == 3
+
+
+# ---------------------------------------------------------------- ambiguity
+
+
+def _ambiguity_payload(count: int) -> dict:
+    return {
+        "is_ambiguous": True,
+        "interpretations": [
+            {"label": f"r{i}", "sql": f"SELECT {i};", "explanation": "e"}
+            for i in range(count)
+        ],
+    }
+
+
+def test_an_ambiguous_response_becomes_a_clarification_not_a_query(
+    tmp_path, monkeypatch
+) -> None:
+    """The whole point: no `.sql` is handed back for the caller to run."""
+    monkeypatch.setenv("QUERYGUARD_LLM_LOG", str(tmp_path / "llm_calls.jsonl"))
+    fake = FakeAnthropic(parsed=_ambiguous_answer())
+
+    answer, result = generate_sql_with_stats(
+        "What was our revenue last quarter?",
+        client=LLMClient(sdk_client=fake),
+        schema=_synthetic_schema(),
+    )
+
+    assert isinstance(answer, ClarificationNeeded)
+    assert not isinstance(answer, GeneratedSQL)
+    assert answer.question == "What was our revenue last quarter?"
+    assert [option.label for option in answer.interpretations] == [
+        "gross_revenue",
+        "net_of_refunds",
+    ]
+    # Every reading must be runnable, not prose describing a query.
+    assert all(option.sql.upper().startswith("SELECT") for option in answer.interpretations)
+    # The call still happened and still cost money.
+    assert result.cost_usd > 0
+
+
+def test_an_unambiguous_response_still_returns_sql(tmp_path, monkeypatch) -> None:
+    """The common path must not regress: one reading, one query, no clarification."""
+    monkeypatch.setenv("QUERYGUARD_LLM_LOG", str(tmp_path / "llm_calls.jsonl"))
+    fake = FakeAnthropic(parsed=_sample_answer())
+
+    answer, _ = generate_sql_with_stats(
+        "How many orders were cancelled?",
+        client=LLMClient(sdk_client=fake),
+        schema=_synthetic_schema(),
+    )
+
+    assert isinstance(answer, GeneratedSQL)
+    assert answer.sql == "SELECT count(*) FROM orders WHERE status = 'cancelled';"
+    assert answer.ambiguity.is_ambiguous is False
+    assert answer.ambiguity.interpretations == []
+
+
+@pytest.mark.parametrize("count", [0, 1, 4])
+def test_ambiguous_needs_two_or_three_interpretations(count) -> None:
+    with pytest.raises(ValidationError):
+        Ambiguity(**_ambiguity_payload(count))
+
+
+@pytest.mark.parametrize("count", [2, 3])
+def test_two_or_three_interpretations_are_accepted(count) -> None:
+    assert len(Ambiguity(**_ambiguity_payload(count)).interpretations) == count
+
+
+def test_empty_top_level_sql_is_allowed_only_when_ambiguous() -> None:
+    """`sql` is mandatory exactly when a single reading was actually chosen."""
+    base = {
+        "explanation": "e",
+        "confidence": 0.0,
+        "tables_used": [],
+        "columns_used": [],
+        "assumptions": [],
+    }
+
+    assert GeneratedSQL(sql="", ambiguity=_ambiguity_payload(2), **base).sql == ""
+
+    with pytest.raises(ValidationError):
+        GeneratedSQL(
+            sql="", ambiguity={"is_ambiguous": False, "interpretations": []}, **base
+        )
+
+
+def test_an_interpretation_may_not_smuggle_in_a_write() -> None:
+    """Interpretation SQL is held to the same standard as a lone answer."""
+    for statement in ("DELETE FROM orders;", "-- innocent\nDROP TABLE orders;", "   "):
+        with pytest.raises(ValidationError):
+            Interpretation(label="l", sql=statement, explanation="e")
+
+
+def test_surplus_interpretations_on_an_unambiguous_answer_are_ignored() -> None:
+    """Tolerated on purpose: rejecting would discard usable SQL already paid for."""
+    answer = Ambiguity(
+        is_ambiguous=False,
+        interpretations=[Interpretation(label="l", sql="SELECT 1;", explanation="e")],
+    )
+    assert answer.is_ambiguous is False
+
+
+def test_clarification_renders_every_reading_with_its_query() -> None:
+    result = CallResult(parsed=None, message=None, usage=FakeUsage(), cost_usd=0.01, latency_ms=5)
+    answer = ClarificationNeeded(
+        question="What was our revenue last quarter?",
+        interpretations=_ambiguous_answer().ambiguity.interpretations,
+    )
+
+    rendered = _render_clarification(answer, result)
+
+    assert "CLARIFICATION NEEDED - 2 defensible readings" in rendered
+    for option in answer.interpretations:
+        assert option.label in rendered
+        assert option.explanation in rendered
+        # The SQL is indented into the block, so match a distinctive line.
+        assert option.sql.splitlines()[0].strip() in rendered
+    assert "Cost        : $0.010000" in rendered
+
+
+@pytest.mark.parametrize(
+    "parsed,expected_code,expected_text",
+    [
+        (_sample_answer, 0, "SELECT count(*)"),
+        (_ambiguous_answer, 3, "CLARIFICATION NEEDED"),
+    ],
+)
+def test_cli_exit_code_distinguishes_a_clarification_from_a_query(
+    parsed, expected_code, expected_text, tmp_path, monkeypatch, capsys
+) -> None:
+    """A caller must be able to branch on the outcome without parsing stdout."""
+    monkeypatch.setenv("QUERYGUARD_LLM_LOG", str(tmp_path / "llm_calls.jsonl"))
+    monkeypatch.setattr(
+        generate_mod, "build_system_blocks", lambda schema=None: build_system_blocks(
+            _synthetic_schema()
+        )
+    )
+    monkeypatch.setattr(
+        generate_mod, "LLMClient", lambda **kw: LLMClient(sdk_client=FakeAnthropic(parsed=parsed()))
+    )
+
+    code = generate_mod.main(["a question"])
+
+    assert code == expected_code
+    assert expected_text in capsys.readouterr().out

@@ -49,7 +49,33 @@ Rules:
   filter you decided to apply. If you assumed nothing, return an empty list.
 - `confidence` is your own honest estimate that this query answers the question
   as asked: 1.0 only when the question is unambiguous and fully covered by the
-  schema; below 0.5 when you had to guess at intent."""
+  schema; below 0.5 when you had to guess at intent.
+
+Ambiguity:
+- If a term in the question has more than one defensible meaning given the
+  schema comments, set `ambiguity.is_ambiguous` to true and list each meaning
+  in `ambiguity.interpretations` with a short `label`, runnable `sql`, and an
+  `explanation` of what that reading counts and what it leaves out. Give two
+  or three -- never one, never four. Do not pick one silently.
+- Terms that usually need this: "revenue" (gross, or net of refunds), "spent"
+  (including or excluding cancelled orders), "last quarter" (the last complete
+  calendar quarter, or the trailing 90 days), "active", "top" (by amount, or by
+  count). A term is ambiguous only in context: decide against this schema, not
+  from the list.
+- Flag only when the readings would return materially different rows AND each
+  is genuinely defensible. Most questions are not ambiguous. If the schema
+  comments settle the meaning, it is settled -- `status` is an enumerated
+  column whose comment defines every value, so "cancelled orders" means
+  status = 'cancelled' and nothing else. Do not flag a question merely because
+  a column is nullable, or because you would like to confirm the obvious.
+- Prefer a single query when one reading is clearly what was meant and the
+  others are strained. Record the judgement call in `assumptions` instead --
+  that is what `assumptions` is for. Reserve `is_ambiguous` for a genuine fork.
+- When `is_ambiguous` is true, leave `sql` empty, set `confidence` to 0.0, and
+  use `explanation` to name the term that is ambiguous and why. Every rule
+  above still applies to the SQL inside each interpretation.
+- When `is_ambiguous` is false, leave `interpretations` empty and answer with
+  `sql` as usual."""
 
 
 def build_system_blocks(schema: DatabaseSchema | None = None) -> list[dict[str, Any]]:
