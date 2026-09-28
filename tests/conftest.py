@@ -9,8 +9,10 @@ the pure-rendering tests still run, so the suite is never vacuous.
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
+from queryguard.config import database_url
 from queryguard.schema.introspect import DatabaseSchema, introspect_database
 
 
@@ -21,3 +23,25 @@ def live_schema() -> DatabaseSchema:
         return introspect_database()
     except (SQLAlchemyError, RuntimeError) as exc:
         pytest.skip(f"queryguard-db not reachable, run `docker compose up -d` ({exc})")
+
+
+@pytest.fixture(scope="session")
+def live_database() -> None:
+    """Skip when Postgres is not reachable through the read-only role.
+
+    Separate from `live_schema` because the executor tests need a working
+    `queryguard_ro` connection specifically -- the owner being reachable proves
+    nothing about the role whose privileges are the thing under test.
+    """
+    try:
+        engine = create_engine(database_url(readonly=True))
+        try:
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
+        finally:
+            engine.dispose()
+    except (SQLAlchemyError, RuntimeError) as exc:
+        pytest.skip(
+            f"queryguard-db not reachable as queryguard_ro, "
+            f"run `docker compose up -d` ({exc})"
+        )
