@@ -14,6 +14,7 @@ dependencies = [
     "python-dotenv",
     "pydantic",
     "pytest",
+    "pyyaml>=6.0.3",
 ]
 
 [build-system]
@@ -29,3 +30,5 @@ package = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# The repo root, so tests can import the top-level `evals` package.
+pythonpath = ["."]

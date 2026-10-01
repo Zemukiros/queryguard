@@ -1,0 +1,571 @@
+# Golden eval set: 50 questions with known-correct answers.
+#
+# Every golden_sql was executed through the read-only executor and its result
+# recorded in golden_results.json by `uv run python -m evals.run_golden`. Edit a
+# query here and re-run that, or the stored hash no longer describes it.
+#
+# Conventions:
+# - Dates are fixed literals (DATE 'YYYY-MM-DD'), never now(): a golden answer
+#   that moves with the clock is not golden. The seed is anchored at 2026-09-03.
+# - `ordered: true` means row order is part of the answer (top-N, rankings);
+#   otherwise results compare as sets.
+# - No question repeats a few-shot example from llm/examples.py -- an eval the
+#   prompt has already memorised measures nothing.
+# - Ambiguous and unanswerable entries carry `expected_outcome` instead of
+#   golden_sql: the right behaviour is to ask, or to say the schema cannot
+#   answer, not to run a query.
+# - `notes` names the trap. That is the point of each entry: the plausible
+#   wrong query it is designed to catch.
+
+questions:
+
+  # ------------------------------------------------------------ simple lookup
+
+  - id: lookup_01
+    category: simple_lookup
+    question: What is the email address and country of customer 117?
+    golden_sql: |
+      SELECT c.email, c.country
+      FROM customers AS c
+      WHERE c.customer_id = 117
+    notes: Baseline single-row lookup by primary key.
+
+  - id: lookup_02
+    category: simple_lookup
+    question: How many orders were cancelled?
+    golden_sql: |
+      SELECT count(*) AS cancelled_orders
+      FROM orders AS o
+      WHERE o.status = 'cancelled'
+    notes: >
+      Status values are lower-case. 'Cancelled' matches nothing and returns a
+      count of 0 -- the case-mismatch the live run injected.
+
+  - id: lookup_03
+    category: simple_lookup
+    question: Which products are out of stock?
+    golden_sql: |
+      SELECT p.product_id, p.name
+      FROM products AS p
+      WHERE p.stock_quantity = 0
+    notes: >
+      in_stock mirrors stock_quantity > 0, so either filter is right; a filter
+      on discontinued_at is not (discontinued is a different thing).
+
+  - id: lookup_04
+    category: simple_lookup
+    question: Which product categories are inactive?
+    golden_sql: |
+      SELECT cat.category_id, cat.name
+      FROM categories AS cat
+      WHERE NOT cat.is_active
+    notes: Inactive categories still have products; do not infer from products.
+
+  - id: lookup_05
+    category: simple_lookup
+    question: How many customers are based in Germany?
+    golden_sql: |
+      SELECT count(*) AS customers
+      FROM customers AS c
+      WHERE c.country = 'Germany'
+    notes: Country names are capitalised; 'germany' or 'DE' matches nothing.
+
+  - id: lookup_06
+    category: simple_lookup
+    question: What is the current list price of product SKU-00042?
+    golden_sql: |
+      SELECT p.sku, p.price
+      FROM products AS p
+      WHERE p.sku = 'SKU-00042'
+    notes: >
+      List price is products.price. order_items.unit_price is the price paid
+      at order time and differs by up to 5%.
+
+  - id: lookup_07
+    category: simple_lookup
+    question: How many customers have never been asked for marketing consent?
+    golden_sql: |
+      SELECT count(*) AS never_asked
+      FROM customers AS c
+      WHERE c.marketing_opt_in IS NULL
+    notes: NULL means never asked, which is distinct from false (declined).
+
+  # -------------------------------------------------------- multi-table JOIN
+
+  - id: join_01
+    category: join
+    question: List every order placed by customer 42 with its date, total and the customer's last name.
+    golden_sql: |
+      SELECT o.order_id, o.order_date, o.total_amount, c.last_name
+      FROM orders AS o
+      JOIN customers AS c ON c.customer_id = o.customer_id
+      WHERE c.customer_id = 42
+    notes: Plain FK join; all of the customer's orders, cancelled ones included.
+
+  - id: join_02
+    category: join
+    question: Which products were bought in order 1234, and how many units of each?
+    golden_sql: |
+      SELECT p.product_id, p.name, oi.quantity
+      FROM order_items AS oi
+      JOIN products AS p ON p.product_id = oi.product_id
+      WHERE oi.order_id = 1234
+    notes: Exactly three line items per order; a quantity of 0 can occur.
+
+  - id: join_03
+    category: join
+    question: Which customers have never placed an order?
+    golden_sql: |
+      SELECT c.customer_id, c.email
+      FROM customers AS c
+      LEFT JOIN orders AS o ON o.customer_id = c.customer_id
+      WHERE o.order_id IS NULL
+    notes: >
+      Anti-join. An inner join returns nothing; the answer is customers
+      481-500.
+
+  - id: join_04
+    category: join
+    question: List the refunds approved by j.kim, with the customer's email and the refund amount.
+    golden_sql: |
+      SELECT r.refund_id, c.email, r.amount
+      FROM refunds AS r
+      JOIN orders AS o ON o.order_id = r.order_id
+      JOIN customers AS c ON c.customer_id = o.customer_id
+      WHERE r.approved_by = 'j.kim'
+    notes: Two-hop join through orders; refunds has no customer_id.
+
+  - id: join_05
+    category: join
+    question: Which products have never been ordered?
+    golden_sql: |
+      SELECT p.product_id, p.name
+      FROM products AS p
+      WHERE NOT EXISTS (
+        SELECT 1 FROM order_items AS oi WHERE oi.product_id = p.product_id
+      )
+    notes: Anti-join; the answer is products 186-200.
+
+  - id: join_06
+    category: join
+    question: What category is each product in order 2500 from?
+    golden_sql: |
+      SELECT oi.order_item_id, p.name AS product, cat.name AS category
+      FROM order_items AS oi
+      JOIN products AS p ON p.product_id = oi.product_id
+      JOIN categories AS cat ON cat.category_id = p.category_id
+      WHERE oi.order_id = 2500
+    notes: Three-table chain; category is reached through products.
+
+  - id: join_07
+    category: join
+    question: Show each subcategory with the name of its parent category.
+    golden_sql: |
+      SELECT child.name AS subcategory, parent.name AS parent_category
+      FROM categories AS child
+      JOIN categories AS parent ON parent.category_id = child.parent_category_id
+    notes: >
+      Self-join. A LEFT JOIN also lists the six top-level categories with a
+      NULL parent, which are not subcategories.
+
+  # -------------------------------------------------------- GROUP BY aggregation
+
+  - id: agg_01
+    category: aggregation
+    question: How many orders are there in each status?
+    golden_sql: |
+      SELECT o.status, count(*) AS orders
+      FROM orders AS o
+      GROUP BY o.status
+    notes: All six statuses, cancelled included.
+
+  - id: agg_02
+    category: aggregation
+    question: How many customers are there in each country?
+    golden_sql: |
+      SELECT c.country, count(*) AS customers
+      FROM customers AS c
+      GROUP BY c.country
+    notes: Counts customers, not orders; customers without orders still count.
+
+  - id: agg_03
+    category: aggregation
+    question: What is the average list price of products in each category?
+    golden_sql: |
+      SELECT cat.name AS category, round(avg(p.price), 2) AS avg_list_price
+      FROM products AS p
+      JOIN categories AS cat ON cat.category_id = p.category_id
+      GROUP BY cat.name
+    notes: List price is products.price, not the unit_price paid on orders.
+
+  - id: agg_04
+    category: aggregation
+    question: How many units of each product were sold, excluding cancelled orders?
+    golden_sql: |
+      SELECT oi.product_id, sum(oi.quantity) AS units_sold
+      FROM order_items AS oi
+      JOIN orders AS o ON o.order_id = oi.order_id
+      WHERE o.status <> 'cancelled'
+      GROUP BY oi.product_id
+    notes: >
+      Cancelled orders keep their line items (534 lines), so units must be
+      filtered through orders.status. count(*) counts lines, not units.
+
+  - id: agg_05
+    category: aggregation
+    question: How many refunds did each approver handle, counting auto-approved refunds as their own group?
+    golden_sql: |
+      SELECT r.approved_by, count(*) AS refunds
+      FROM refunds AS r
+      GROUP BY r.approved_by
+    notes: NULL approved_by means auto-approved and must survive as a group.
+
+  - id: agg_06
+    category: aggregation
+    question: How many distinct customers have placed orders, per country?
+    golden_sql: |
+      SELECT c.country, count(DISTINCT o.customer_id) AS ordering_customers
+      FROM orders AS o
+      JOIN customers AS c ON c.customer_id = o.customer_id
+      GROUP BY c.country
+    notes: count(*) here counts orders, not customers.
+
+  - id: agg_07
+    category: aggregation
+    question: What is the total line-item revenue per category, after per-unit discounts, excluding cancelled orders?
+    golden_sql: |
+      SELECT cat.name AS category,
+             sum(oi.quantity * oi.unit_price - coalesce(oi.discount, 0) * oi.quantity) AS revenue
+      FROM order_items AS oi
+      JOIN orders AS o ON o.order_id = oi.order_id
+      JOIN products AS p ON p.product_id = oi.product_id
+      JOIN categories AS cat ON cat.category_id = p.category_id
+      WHERE o.status <> 'cancelled'
+      GROUP BY cat.name
+    notes: >
+      discount is per unit, not per line, and NULL means none -- without
+      coalesce every discounted-NULL line drops out of the sum.
+
+  # ---------------------------------------------------------- date-range filter
+
+  - id: date_01
+    category: date_range
+    question: How many orders were placed in 2025?
+    golden_sql: |
+      SELECT count(*) AS orders
+      FROM orders AS o
+      WHERE o.order_date >= DATE '2025-01-01'
+        AND o.order_date < DATE '2026-01-01'
+    notes: Half-open interval on a timestamptz; BETWEEN would include 2026-01-01 00:00.
+
+  - id: date_02
+    category: date_range
+    question: What was the total order amount for orders placed in March 2026?
+    golden_sql: |
+      SELECT sum(o.total_amount) AS total
+      FROM orders AS o
+      WHERE o.order_date >= DATE '2026-03-01'
+        AND o.order_date < DATE '2026-04-01'
+    notes: <= DATE '2026-03-31' silently drops orders placed during March 31.
+
+  - id: date_03
+    category: date_range
+    question: How many customers signed up in 2024?
+    golden_sql: |
+      SELECT count(*) AS signups
+      FROM customers AS c
+      WHERE c.signup_date >= DATE '2024-01-01'
+        AND c.signup_date < DATE '2025-01-01'
+    notes: signup_date, not the first order date (they are unrelated).
+
+  - id: date_04
+    category: date_range
+    question: How many refunds were issued in the first quarter of 2026?
+    golden_sql: |
+      SELECT count(*) AS refunds
+      FROM refunds AS r
+      WHERE r.refunded_at >= DATE '2026-01-01'
+        AND r.refunded_at < DATE '2026-04-01'
+    notes: Issued means refunded_at, not the date the refunded order was placed.
+
+  - id: date_05
+    category: date_range
+    question: How many orders were shipped in August 2026?
+    golden_sql: |
+      SELECT count(*) AS shipped
+      FROM orders AS o
+      WHERE o.shipped_at >= DATE '2026-08-01'
+        AND o.shipped_at < DATE '2026-09-01'
+    notes: >
+      shipped_at, not order_date. status = 'shipped' is also wrong: delivered
+      and refunded orders were shipped too.
+
+  - id: date_06
+    category: date_range
+    question: Which products were discontinued during 2026?
+    golden_sql: |
+      SELECT p.product_id, p.name, p.discontinued_at
+      FROM products AS p
+      WHERE p.discontinued_at >= DATE '2026-01-01'
+        AND p.discontinued_at < DATE '2027-01-01'
+    notes: discontinued_at, not in_stock; NULL means still sold.
+
+  - id: date_07
+    category: date_range
+    question: How many orders were placed on 24 December 2025?
+    golden_sql: |
+      SELECT count(*) AS orders
+      FROM orders AS o
+      WHERE o.order_date >= DATE '2025-12-24'
+        AND o.order_date < DATE '2025-12-25'
+    notes: >
+      A single day on a timestamptz needs a one-day range; = DATE '2025-12-24'
+      matches only midnight.
+
+  # -------------------------------------------------------------------- top-N
+
+  - id: topn_01
+    category: top_n
+    question: Which 5 products generated the most line-item revenue in 2025, excluding cancelled orders?
+    ordered: true
+    golden_sql: |
+      SELECT p.product_id, p.name,
+             sum(oi.quantity * oi.unit_price - coalesce(oi.discount, 0) * oi.quantity) AS revenue
+      FROM order_items AS oi
+      JOIN orders AS o ON o.order_id = oi.order_id
+      JOIN products AS p ON p.product_id = oi.product_id
+      WHERE o.status <> 'cancelled'
+        AND o.order_date >= DATE '2025-01-01'
+        AND o.order_date < DATE '2026-01-01'
+      GROUP BY p.product_id, p.name
+      ORDER BY revenue DESC
+      LIMIT 5
+    notes: Revenue from what was paid (unit_price), not products.price.
+
+  - id: topn_02
+    category: top_n
+    question: Which 3 countries have the most customers?
+    ordered: true
+    golden_sql: |
+      SELECT c.country, count(*) AS customers
+      FROM customers AS c
+      GROUP BY c.country
+      ORDER BY customers DESC
+      LIMIT 3
+    notes: Customers, not orders; Germany and UK differ by one.
+
+  - id: topn_03
+    category: top_n
+    question: What are the 10 largest orders by total amount?
+    ordered: true
+    golden_sql: |
+      SELECT o.order_id, o.total_amount
+      FROM orders AS o
+      ORDER BY o.total_amount DESC, o.order_id
+      LIMIT 10
+    notes: total_amount, not a recomputed or refunded figure.
+
+  - id: topn_04
+    category: top_n
+    question: Which 5 customers had the highest combined order total in 2025, counting delivered orders only?
+    ordered: true
+    golden_sql: |
+      SELECT o.customer_id, sum(o.total_amount) AS delivered_total
+      FROM orders AS o
+      WHERE o.status = 'delivered'
+        AND o.order_date >= DATE '2025-01-01'
+        AND o.order_date < DATE '2026-01-01'
+      GROUP BY o.customer_id
+      ORDER BY delivered_total DESC
+      LIMIT 5
+    notes: >
+      Explicit status and year, so not ambiguous. customers.lifetime_value is
+      all-time and multi-status -- the injected hallucination from the live run.
+
+  - id: topn_05
+    category: top_n
+    question: Which category has the highest line-item revenue, excluding cancelled orders?
+    ordered: true
+    golden_sql: |
+      SELECT cat.name AS category,
+             sum(oi.quantity * oi.unit_price - coalesce(oi.discount, 0) * oi.quantity) AS revenue
+      FROM order_items AS oi
+      JOIN orders AS o ON o.order_id = oi.order_id
+      JOIN products AS p ON p.product_id = oi.product_id
+      JOIN categories AS cat ON cat.category_id = p.category_id
+      WHERE o.status <> 'cancelled'
+      GROUP BY cat.name
+      ORDER BY revenue DESC
+      LIMIT 1
+    notes: Top-1 through a three-hop join.
+
+  - id: topn_06
+    category: top_n
+    question: Which 3 staff members approved the largest total refund amount, excluding auto-approved refunds?
+    ordered: true
+    golden_sql: |
+      SELECT r.approved_by, sum(r.amount) AS refunded
+      FROM refunds AS r
+      WHERE r.approved_by IS NOT NULL
+      GROUP BY r.approved_by
+      ORDER BY refunded DESC
+      LIMIT 3
+    notes: The NULL (auto-approved) group would otherwise rank first.
+
+  # ------------------------------------------------- refund / net-revenue traps
+
+  - id: refund_01
+    category: refund_trap
+    question: What was net revenue from orders placed in 2025, after refunds?
+    golden_sql: |
+      WITH paid_orders AS (
+        SELECT o.order_id, o.total_amount
+        FROM orders AS o
+        WHERE o.status IN ('paid', 'shipped', 'delivered', 'refunded')
+          AND o.order_date >= DATE '2025-01-01'
+          AND o.order_date < DATE '2026-01-01'
+      )
+      SELECT (SELECT sum(po.total_amount) FROM paid_orders AS po)
+           - (SELECT coalesce(sum(r.amount), 0)
+              FROM refunds AS r
+              JOIN paid_orders AS po ON po.order_id = r.order_id) AS net_revenue
+    notes: >
+      total_amount is NOT reduced by refunds, so net = paid order totals minus
+      refunds.amount. Pending orders are unpaid and excluded (the statuses
+      match lifetime_value's definition). Refunds are attributed to the order's
+      date, not refunded_at. The two sums are kept separate so a join cannot
+      repeat an order total, even though there is at most one refund per order.
+
+  - id: refund_02
+    category: refund_trap
+    question: What is the total amount of money refunded?
+    golden_sql: |
+      SELECT sum(r.amount) AS refunded
+      FROM refunds AS r
+    notes: >
+      The refunds table, not sum(total_amount) of status = 'refunded' orders:
+      partial refunds return only 10-60%, and delivered orders carry refunds too.
+
+  - id: refund_03
+    category: refund_trap
+    question: How many orders have a refund recorded against them?
+    golden_sql: |
+      SELECT count(DISTINCT r.order_id) AS refunded_orders
+      FROM refunds AS r
+    notes: >
+      300 orders have refund rows; 307 have status = 'refunded', and most
+      refund rows belong to delivered orders. The two are not the same set.
+
+  - id: refund_04
+    category: refund_trap
+    question: What was gross revenue from orders placed in 2025, before refunds?
+    golden_sql: |
+      SELECT sum(o.total_amount) AS gross_revenue
+      FROM orders AS o
+      WHERE o.status IN ('paid', 'shipped', 'delivered', 'refunded')
+        AND o.order_date >= DATE '2025-01-01'
+        AND o.order_date < DATE '2026-01-01'
+    notes: >
+      Gross still excludes unpaid (pending) orders; cancelled are zero either
+      way. Refunded orders count: gross is before refunds.
+
+  - id: refund_05
+    category: refund_trap
+    question: Which customers received full (non-partial) refunds totalling more than $5,000?
+    golden_sql: |
+      SELECT o.customer_id, sum(r.amount) AS fully_refunded
+      FROM refunds AS r
+      JOIN orders AS o ON o.order_id = r.order_id
+      WHERE NOT r.is_partial
+      GROUP BY o.customer_id
+      HAVING sum(r.amount) > 5000
+    notes: is_partial false means a full refund; the threshold is on refund amounts.
+
+  - id: refund_06
+    category: refund_trap
+    question: What was net revenue from delivered orders placed in 2025, after refunds?
+    golden_sql: |
+      SELECT sum(o.total_amount) - coalesce(sum(r.amount), 0) AS net_delivered
+      FROM orders AS o
+      LEFT JOIN refunds AS r ON r.order_id = o.order_id
+      WHERE o.status = 'delivered'
+        AND o.order_date >= DATE '2025-01-01'
+        AND o.order_date < DATE '2026-01-01'
+    notes: >
+      Delivered orders carry most refunds, so "delivered" does not mean "kept".
+      LEFT JOIN: an inner join drops every unrefunded order from the total.
+      Safe to sum after the join only because there is at most one refund per
+      order.
+
+  # ---------------------------------------------- ambiguous: expect clarification
+
+  - id: ambig_01
+    category: ambiguous
+    question: What was our revenue last quarter?
+    expected_outcome: clarification
+    readings: [gross vs net of refunds, last complete calendar quarter vs trailing 90 days]
+    notes: Two independent ambiguities; any single query silently picks both.
+
+  - id: ambig_02
+    category: ambiguous
+    question: Who are our top 10 customers?
+    expected_outcome: clarification
+    readings: [by total spend, by number of orders, by lifetime_value]
+    notes: The word "top" names no metric.
+
+  - id: ambig_03
+    category: ambiguous
+    question: Which customers spent the most last year?
+    expected_outcome: clarification
+    readings: [including vs excluding refunded amounts, which statuses count as spent]
+    notes: >
+      "Last year" is settled by the date, but "spent" is not -- the live run's
+      question (b) drew three readings for the same word.
+
+  - id: ambig_04
+    category: ambiguous
+    question: How many new customers did we get last month?
+    expected_outcome: clarification
+    readings: [by signup_date, by first order date]
+    notes: signup_date is documented as unrelated to the first order date.
+
+  - id: ambig_05
+    category: ambiguous
+    question: What is our best-selling product?
+    expected_outcome: clarification
+    readings: [by units sold, by revenue]
+    notes: Units and revenue rank products differently.
+
+  # ------------------------------- unanswerable from this schema: expect refusal
+
+  - id: unans_01
+    category: unanswerable
+    question: What is the average time between shipping and delivery?
+    expected_outcome: refusal_or_clarification
+    notes: >
+      There is shipped_at but no delivered_at. A query using refunded_at or
+      order_date as a stand-in is a hallucinated answer.
+
+  - id: unans_02
+    category: unanswerable
+    question: Which warehouse ships the most orders?
+    expected_outcome: refusal_or_clarification
+    notes: No warehouse data anywhere; shipping_address is the customer's.
+
+  - id: unans_03
+    category: unanswerable
+    question: How many visitors added items to their cart but did not buy?
+    expected_outcome: refusal_or_clarification
+    notes: No session or cart data; pending orders are not abandoned carts.
+
+  - id: unans_04
+    category: unanswerable
+    question: What is the average age of our customers?
+    expected_outcome: refusal_or_clarification
+    notes: No birth date; signup_date is account age, not customer age.
+
+  - id: unans_05
+    category: unanswerable
+    question: Which supplier provides the most products?
+    expected_outcome: refusal_or_clarification
+    notes: No supplier data; category is not a supplier.

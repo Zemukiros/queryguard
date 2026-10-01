@@ -1,0 +1,275 @@
+{
+  "generated_at": "2026-10-01T03:54:45.977769+00:00",
+  "results": {
+    "agg_01": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "3a521d862b8cf2f16a1e87f49d1f060a91cb388fdbca45ecb18ad498cec814bc",
+      "row_count": 6
+    },
+    "agg_02": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "a0652c2188f9447b7c0fa3306acf45419cc0d60f8ca2afbec960513fb8c98ff9",
+      "row_count": 8
+    },
+    "agg_03": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "6321854f4c94dafa60911edab8187d94308421b02b299e6c5865163f6e398108",
+      "row_count": 12
+    },
+    "agg_04": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "aad7e42b76b0876b331d7e93ff2f881a4f8f5100a1b74e1c65d4dffdb1080fda",
+      "row_count": 185
+    },
+    "agg_05": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "084fda980446c84385adbb2e0bfc18d78eb0477441e8b4fdbaeca3b8eeeff6eb",
+      "row_count": 5
+    },
+    "agg_06": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "41a52ea18301d0d2aa16c02466d758a5e4c12e6b9d1a9ae9ea79c2a10b7c797d",
+      "row_count": 8
+    },
+    "agg_07": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "aec505f2c119ed35c1a18f5f883bc7f8bf4747d0a10d7dabb440122abcaeae5b",
+      "row_count": 12
+    },
+    "ambig_01": {
+      "expected_outcome": "clarification"
+    },
+    "ambig_02": {
+      "expected_outcome": "clarification"
+    },
+    "ambig_03": {
+      "expected_outcome": "clarification"
+    },
+    "ambig_04": {
+      "expected_outcome": "clarification"
+    },
+    "ambig_05": {
+      "expected_outcome": "clarification"
+    },
+    "date_01": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "71517b33a169c8bf4aa365df2c55f25f94e5ff8b471649fa8710bbb58bb78db2",
+      "row_count": 1
+    },
+    "date_02": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "a83bf59e4d9f4497fc4b4b9a56465f88fdde5f6393659b6a478efb05f874c14b",
+      "row_count": 1
+    },
+    "date_03": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "b1a76e939a6b8c2c0e0457420b7fce75a776fdf350776a32a84a0a9a1cff2b07",
+      "row_count": 1
+    },
+    "date_04": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "d1d8a6f3438c45745b0ca284dc1e62ef72ebf5c55e3c034cf36396ceccdcf23e",
+      "row_count": 1
+    },
+    "date_05": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "fb75ab0ca1dd40f89405ff5943f33c664f5796dadd21f7c06bbbbd88c8ffc522",
+      "row_count": 1
+    },
+    "date_06": {
+      "columns": 3,
+      "ordered": false,
+      "result_sha256": "35195bb43bc4c7b2dfd36b795d21eb8c57545fccc2764417ddc13336693150ed",
+      "row_count": 10
+    },
+    "date_07": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "af65106e148d6b27189d4b512cd8e6ab5be15ceebebcea99f36b841ddee31d9d",
+      "row_count": 1
+    },
+    "join_01": {
+      "columns": 4,
+      "ordered": false,
+      "result_sha256": "75782169d28ae4c83b9a9c041d8a0f6926b26a3ad68c4b13e31449dfbc4163b6",
+      "row_count": 14
+    },
+    "join_02": {
+      "columns": 3,
+      "ordered": false,
+      "result_sha256": "d47c2f25a59234159a8f7168e2f13829dc13a1ee24f101ae0949ab8e2545fa3d",
+      "row_count": 3
+    },
+    "join_03": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "f6e4c41a5d96d21617a900c1886b862c17d1c7a8d8730aee920fbb184431099d",
+      "row_count": 20
+    },
+    "join_04": {
+      "columns": 3,
+      "ordered": false,
+      "result_sha256": "3c3ec3d2589ae55fe5b0972c9fa5ec6b8432a9e472de1ed5ae233b70d7257c92",
+      "row_count": 40
+    },
+    "join_05": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "7919fb10b92d9a785f46c9773fd67086db4191af9effd7aec7ad175be21ef600",
+      "row_count": 15
+    },
+    "join_06": {
+      "columns": 3,
+      "ordered": false,
+      "result_sha256": "1398209d517058c6b4fee9d38d17033b3216791639e0e2e100096c3658711116",
+      "row_count": 3
+    },
+    "join_07": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "468426656dd4217234f2f04f3f30d2aa57cba9e99085399bb6a6317989e8a9f8",
+      "row_count": 6
+    },
+    "lookup_01": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "e5a5a0a3e84aa469eb9fbae5e65484879501358b296f7f98a72c5eeb0c5b3ede",
+      "row_count": 1
+    },
+    "lookup_02": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "150ecd87e5be5bb7ef2c02d95bc2def9175529d968c4ac857d6d1348c2e6d4db",
+      "row_count": 1
+    },
+    "lookup_03": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "42a17ea01ba44150af4ac695630fa878ddee72c31c08f82b72501b0ebb443d54",
+      "row_count": 24
+    },
+    "lookup_04": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "f14cc0bb26a9c86721072cf25355cbb18d10a556d3cbdd03119521b6b1bd880e",
+      "row_count": 2
+    },
+    "lookup_05": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "372edfda3ad631a03b7a00c468ae2b940309f80df2ac86f228f68f8ee7b52249",
+      "row_count": 1
+    },
+    "lookup_06": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "a47ee4975b3dc803f3299404e7c10f052fdc567f914f5eb9e973c2cfcd482954",
+      "row_count": 1
+    },
+    "lookup_07": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "0220d62254688b3eec13be3e179e8644e5513532d01ee6c58b7b963d30d1513f",
+      "row_count": 1
+    },
+    "refund_01": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "19ce5759e7506f7cbaac8f50ac2d078addb81aa234f68451c98208ee872cc825",
+      "row_count": 1
+    },
+    "refund_02": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "88a0ebceae0abcc896c3d64fd921a6e0177feea01761dd5f41699f5a52ffc202",
+      "row_count": 1
+    },
+    "refund_03": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "73297393f7020f6c431fdd03290ffc5aa8ad6ba826bb27e1a6d7b87c14857136",
+      "row_count": 1
+    },
+    "refund_04": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "7cfb9c8133c3ddf8422c749ba199210b3685e167cdc0cd0f33e87a8c0df18fa2",
+      "row_count": 1
+    },
+    "refund_05": {
+      "columns": 2,
+      "ordered": false,
+      "result_sha256": "52e14a5c36f5e7c6f02745a014b2fbc02ca3ef32c617ff9d3a065491cad15062",
+      "row_count": 34
+    },
+    "refund_06": {
+      "columns": 1,
+      "ordered": false,
+      "result_sha256": "505dbd11a7c4720484d957602886093977719c563a771478225ef4f45ce54ac8",
+      "row_count": 1
+    },
+    "topn_01": {
+      "columns": 3,
+      "ordered": true,
+      "result_sha256": "ec412decb0109d7926b025c060958fdde5f9df51c634c9c9bcde4871f92adab1",
+      "row_count": 5
+    },
+    "topn_02": {
+      "columns": 2,
+      "ordered": true,
+      "result_sha256": "897d068b6dac030c3fe5c01715440e63147b2b4bda3498da091edb5136e1cc94",
+      "row_count": 3
+    },
+    "topn_03": {
+      "columns": 2,
+      "ordered": true,
+      "result_sha256": "cb616d14374af6fc3a8d0770882029be9c07a9bb68263049118dac4fec58a9e3",
+      "row_count": 10
+    },
+    "topn_04": {
+      "columns": 2,
+      "ordered": true,
+      "result_sha256": "aadf89aab57f8ff33c94876b9c49b633d91b6843003ccbbfd64a630ecfcb42aa",
+      "row_count": 5
+    },
+    "topn_05": {
+      "columns": 2,
+      "ordered": true,
+      "result_sha256": "e0615109697b2972237625a62b585eaf9077796e1973a0efab102b94baa94820",
+      "row_count": 1
+    },
+    "topn_06": {
+      "columns": 2,
+      "ordered": true,
+      "result_sha256": "cd1d4a80196d0b8f7c0cd72959c3bb4e459fd2b0ebe86f341bd2488643b0b8af",
+      "row_count": 3
+    },
+    "unans_01": {
+      "expected_outcome": "refusal_or_clarification"
+    },
+    "unans_02": {
+      "expected_outcome": "refusal_or_clarification"
+    },
+    "unans_03": {
+      "expected_outcome": "refusal_or_clarification"
+    },
+    "unans_04": {
+      "expected_outcome": "refusal_or_clarification"
+    },
+    "unans_05": {
+      "expected_outcome": "refusal_or_clarification"
+    }
+  }
+}
