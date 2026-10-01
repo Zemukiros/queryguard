@@ -216,6 +216,24 @@ def test_the_estimate_bounds_rows_returned_not_work_done(live_database) -> None:
     assert result.outcome != OUTCOME_REFUSED, "the pre-flight cannot catch this shape"
 
 
+def test_a_timed_out_query_keeps_its_pre_flight_estimate(live_database) -> None:
+    """The plan was made before the timeout fired, so the failure still carries it.
+
+    The test above runs this join under the default 5 s timeout, which it takes
+    about 5 s to finish -- so it lands on either side. This one forces the
+    timeout, so the error path is exercised every run rather than by chance.
+    """
+    result = execute(
+        "SELECT count(*) AS n FROM order_items AS a CROSS JOIN order_items AS b",
+        ExecutorConfig(statement_timeout_ms=500),
+    )
+    assert result.outcome == OUTCOME_FAILED
+    assert result.sqlstate == "57014"
+    assert result.estimated_rows == 1.0
+    assert result.plan is not None
+    assert result.rows is None
+
+
 def test_an_ordinary_aggregate_is_not_refused(live_database) -> None:
     """The ceiling must not reject the queries this project exists to run."""
     result = execute("SELECT count(*) AS n FROM order_items")

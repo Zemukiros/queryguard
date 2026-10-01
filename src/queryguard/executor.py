@@ -251,6 +251,12 @@ def _run(
     conn: Any, sql: str, digest: str, config: ExecutorConfig, log: Path | None
 ) -> ExecutionResult:
     """The body of one sandboxed execution, inside an open transaction."""
+    # Declared before the try so a failure after the pre-flight keeps it. A
+    # query cancelled by statement_timeout was planned first, and the plan is
+    # the evidence for why it ran long -- dropping it on the error path made a
+    # timeout indistinguishable from a failure to plan.
+    plan: Any = None
+    estimated: float | None = None
     try:
         # Must precede every other statement in the transaction, or Postgres
         # rejects it with 25001.
@@ -260,8 +266,6 @@ def _run(
             {"ms": str(config.statement_timeout_ms)},
         )
 
-        plan: Any = None
-        estimated: float | None = None
         if config.explain_first:
             plan, estimated = _explain(conn, sql)
             if estimated is not None and estimated > config.max_estimated_rows:
@@ -310,6 +314,8 @@ def _run(
                 error_class=error_class,
                 error_message=message,
                 sqlstate=sqlstate,
+                plan=plan,
+                estimated_rows=estimated,
             ),
             config,
             log,
