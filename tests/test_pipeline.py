@@ -17,12 +17,21 @@ from datetime import datetime, timezone
 
 import pytest
 
-from queryguard.executor import OUTCOME_FAILED, OUTCOME_REFUSED, ExecutorConfig
+import pandas as pd
+
+from queryguard.executor import (
+    OUTCOME_FAILED,
+    OUTCOME_OK,
+    OUTCOME_REFUSED,
+    ExecutionResult,
+    ExecutorConfig,
+)
 from queryguard.generate import Ambiguity, ClarificationNeeded, GeneratedSQL, Interpretation
 from queryguard.guardrails import DEFAULT_MAX_ROWS, GuardrailConfig
 from queryguard.llm.client import LLMClient, reset_request_count
 from queryguard.pipeline import PipelineResult, run_question
 from queryguard.schema.introspect import ColumnInfo, DatabaseSchema, TableInfo
+from queryguard.validation.sanity import CHECK_EMPTY, WARN
 
 
 @pytest.fixture(autouse=True)
@@ -299,3 +308,38 @@ def test_a_pipeline_run_is_logged_by_both_halves(tmp_path, live_database) -> Non
     execution_log = tmp_path / "executions.jsonl"
     assert len(llm_log.read_text().splitlines()) == 1
     assert len(execution_log.read_text().splitlines()) == 1
+
+
+# ------------------------------------------------------------- sanity flags
+
+
+def test_a_result_carries_its_sanity_flags(monkeypatch) -> None:
+    """No database: the executor is replaced by a result that came back empty."""
+    empty = ExecutionResult(
+        outcome=OUTCOME_OK,
+        sql_sha256="0" * 64,
+        rows=pd.DataFrame({"order_id": pd.Series([], dtype="int64")}),
+    )
+    monkeypatch.setattr("queryguard.pipeline.execute", lambda *a, **k: empty)
+
+    outcome, _ = _run("SELECT order_id FROM orders WHERE status = 'Cancelled'")
+
+    assert outcome.ok, "a flag is advice; the run itself still succeeded"
+    [flag] = outcome.sanity
+    assert flag.check == CHECK_EMPTY
+    assert flag.severity == WARN
+
+
+def test_a_blocked_query_has_no_sanity_flags() -> None:
+    outcome, _ = _run("SELECT order_id FROM orders LIMIT 999999")
+    assert outcome.execution is None
+    assert outcome.sanity == ()
+
+
+def test_sanity_flags_come_from_a_real_execution(live_database) -> None:
+    """The status filter is miscased, so the database really does return nothing."""
+    outcome, _ = _run("SELECT order_id FROM orders WHERE status = 'Cancelled'")
+
+    assert outcome.ok, outcome.execution.error_message
+    assert outcome.execution.row_count == 0
+    assert [f.check for f in outcome.sanity] == [CHECK_EMPTY]

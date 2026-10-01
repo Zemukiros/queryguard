@@ -12,6 +12,11 @@ apart:
   named rule to explain it, but nothing ran.
 - The query ran, or the database refused it.
 
+A query that ran also carries sanity flags: shapes in its rows -- an empty
+result, a column that is mostly NULL, a sum no un-joined table could reach --
+that suggest the SQL answered a different question from the one asked. They are
+advice, not a gate, so the rows are returned either way.
+
 A PipelineResult therefore carries the guardrail outcome even on success: the
 SQL that executed is frequently not the SQL the model wrote -- a missing LIMIT
 is added on the way through -- and a result that showed only one of the two
@@ -31,6 +36,8 @@ from queryguard.executor import ExecutionResult, ExecutorConfig, execute
 from queryguard.generate import ClarificationNeeded, GeneratedSQL, generate_sql_with_stats
 from queryguard.guardrails import GuardrailConfig, GuardrailResult, check
 from queryguard.llm.client import CallResult, LLMClient, RequestCapExceeded
+from queryguard.schema.introspect import load_schema
+from queryguard.validation.sanity import SanityFlag, check_result
 
 
 @dataclass(frozen=True)
@@ -42,6 +49,7 @@ class PipelineResult:
     guardrail: GuardrailResult
     execution: ExecutionResult | None = None
     call: CallResult | None = None
+    sanity: tuple[SanityFlag, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -66,6 +74,10 @@ def run_question(
 
     `client` exists so tests can inject a fake and never reach the API.
     """
+    # Resolved once here because two steps need it: the prompt is built from it
+    # and the sanity checks read its profile.
+    if schema is None:
+        schema = load_schema()
     answer, call = generate_sql_with_stats(question, client=client, schema=schema)
 
     if isinstance(answer, ClarificationNeeded):
@@ -85,12 +97,14 @@ def run_question(
     if executor_config is None:
         executor_config = ExecutorConfig(max_rows=guardrail_config.max_rows)
     execution = execute(guardrail.sql_to_execute, executor_config)
+    sanity = check_result(question, guardrail.sql_to_execute, execution, schema)
     return PipelineResult(
         question=question,
         answer=answer,
         guardrail=guardrail,
         execution=execution,
         call=call,
+        sanity=tuple(sanity),
     )
 
 
@@ -128,6 +142,8 @@ def _render(result: PipelineResult) -> str:
         if result.guardrail.rewritten_sql:
             note += " · LIMIT added by the guardrail"
         lines.append(note)
+        for flag in result.sanity:
+            lines.append(f"{flag.severity.upper()} [{flag.check}] {flag.explanation}")
 
     return "\n".join(lines)
 
