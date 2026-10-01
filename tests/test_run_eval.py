@@ -244,3 +244,83 @@ def test_live_needs_an_explicit_run_id() -> None:
 def test_a_dry_run_cannot_take_a_real_looking_run_id() -> None:
     with pytest.raises(SystemExit):
         run_eval.main(["--run-id", "live-2026-10-01"])
+
+
+# ------------------------------------------------- first-live-run fixes
+
+
+def test_a_refusal_is_correct_for_an_unanswerable_question_only() -> None:
+    from queryguard.generate import CannotAnswer
+
+    refusal = CannotAnswer(question="q?", explanation="no warehouse data")
+    assert label_generated(_item("unanswerable", "refusal_or_clarification"), refusal, FRAMES)[0] == "correct"
+    assert label_generated(_item("simple_lookup"), refusal, FRAMES)[0] == "wrong"
+    assert label_generated(_item("ambiguous", "clarification"), refusal, FRAMES)[0] == "wrong"
+
+
+def test_a_generated_answer_may_add_columns_but_not_drop_them() -> None:
+    item = _item("simple_lookup")
+    with_name = _executed("SELECT", pd.DataFrame({"name": ["x"], "count": [178]}))
+    assert label_generated(item, with_name, FRAMES)[0] == "correct"
+
+
+def test_compare_columns_ignores_the_golden_id_column() -> None:
+    from evals.run_eval import compare_to_golden
+
+    item = Item("gen:join_06", GENERATED, "join", "q?", "join_06", compare_columns=("product", "category"))
+    golden = pd.DataFrame({"order_item_id": [7500], "product": ["Compact Skillet"], "category": ["Cookware"]})
+    generated = pd.DataFrame({"order_id": [2500], "product_id": [105], "product_name": ["Compact Skillet"], "category_name": ["Cookware"]})
+    assert compare_to_golden(item, golden, generated)[0] == "agree"
+    strict = Item("gen:join_06", GENERATED, "join", "q?", "join_06")
+    assert compare_to_golden(strict, golden, generated)[0] != "agree"
+
+
+def test_null_label_ok_accepts_one_consistent_label_for_the_null_group() -> None:
+    from evals.run_eval import compare_to_golden
+
+    item = Item("gen:agg_05", GENERATED, "aggregation", "q?", "agg_05", null_label_ok=True)
+    golden = pd.DataFrame({"approved_by": ["j.kim", None], "refunds": [40, 101]})
+    generated = pd.DataFrame({"approver": ["auto-approved", "j.kim"], "n": [101, 40]})
+    assert compare_to_golden(item, golden, generated)[0] == "agree"
+    wrong_count = generated.assign(n=[100, 40])
+    assert compare_to_golden(item, golden, wrong_count)[0] != "agree"
+
+
+def test_unfinished_items_mean_a_non_zero_exit_and_an_honest_reason() -> None:
+    from evals.run_eval import final_status
+
+    assert final_status("all items finished", []) == ("all items finished", 0)
+    reason, code = final_status("all items finished", ["gen:unans_02"])
+    assert code == 3 and "unfinished" in reason
+    assert final_status("budget: ...", ["mut:x"]) == ("budget: ...", 3)
+
+
+def test_recompute_fixes_agreement_features_and_confidence_offline(live_database) -> None:
+    """A row scored under the old width rule is re-evaluated from its logged SQL."""
+    from evals.recompute import recompute_row
+    from queryguard.validation.confidence import Features, score
+
+    features = dict(
+        executed=True, self_confidence=0.9, alignment=1.0, discrepancy_count=0, sanity_fail=0,
+        sanity_warn=0, sanity_info=0, agreement="incomparable", guardrail_rewrote=True, row_count_bucket="2-10",
+    )
+    before, _ = score(Features(**features))
+    row = {
+        "id": "gold:agg_02", "population": GOLDEN, "question": "How many customers are there in each country?",
+        "sql": "SELECT c.country, count(*) AS customers FROM customers AS c GROUP BY c.country",
+        "outcome": "executed", "label": "correct", "label_reason": "known golden",
+        "features": features, "confidence": before, "confidence_breakdown": {},
+        "detectors": {"agreement": {
+            "outcome": "incomparable", "explanation": "the queries return different columns (2 vs 3)", "flagged": True,
+            "second_sql": "SELECT c.country, count(*) AS n, count(DISTINCT c.city) AS cities FROM customers AS c GROUP BY c.country",
+        }},
+    }
+    item = Item("gold:agg_02", GOLDEN, "aggregation", row["question"], "agg_02")
+    fixed = recompute_row(row, item, {})
+
+    assert fixed["detectors"]["agreement"]["outcome"] == "agree"
+    assert fixed["detectors"]["agreement"]["flagged"] is False
+    assert fixed["features"]["agreement"] == "agree"
+    assert fixed["confidence"] > before
+    assert fixed["corrections"]["agreement"]["outcome"] == "incomparable"
+    assert row["detectors"]["agreement"]["outcome"] == "incomparable", "the input row is not mutated"

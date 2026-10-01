@@ -135,6 +135,41 @@ def estimate_cost_usd(model: str, usage: Any) -> float:
     )
 
 
+# Deliberately pessimistic: two characters per token undercounts characters,
+# so it overcounts tokens -- the prompt measured ~2 chars/token at its densest.
+_CHARS_PER_TOKEN_LOW = 2
+
+
+def upper_bound_cost_usd(model: str, system_blocks: Any, user_message: str, max_tokens: int) -> float:
+    """What a call whose usage was never returned could have cost, at most.
+
+    Every input token priced at the full (uncached) rate, and the full
+    max_tokens of output.
+    """
+    pricing = PRICING[model]
+    text = json.dumps(system_blocks, default=str) + user_message
+    input_tokens = len(text) / _CHARS_PER_TOKEN_LOW
+    return (
+        input_tokens * pricing.input_usd_per_mtok + max_tokens * pricing.output_usd_per_mtok
+    ) / 1_000_000
+
+
+def _was_answered(exc: Exception) -> bool:
+    """Whether the API produced a response the SDK then failed on.
+
+    A response that fails validation was generated and billed. A connection
+    error or a 4xx was not; a 429 or 5xx is not billed either. Unknown errors
+    count as billed, so the log errs towards overcounting.
+    """
+    import anthropic
+
+    if isinstance(exc, anthropic.APIConnectionError):
+        return False
+    if isinstance(exc, anthropic.APIStatusError):
+        return False
+    return True
+
+
 def _cache_was_requested(system_blocks: Any) -> bool:
     """True when at least one system block carries a cache_control marker."""
     if not isinstance(system_blocks, list):
@@ -271,7 +306,30 @@ class LLMClient:
             kwargs["output_config"] = output_config
 
         started = time.perf_counter()
-        message = self._client.messages.parse(**kwargs)
+        try:
+            message = self._client.messages.parse(**kwargs)
+        except Exception as exc:
+            # The request was made, and probably billed, but the response
+            # failed to parse or the request failed, and the SDK raised before
+            # handing back usage. Log it anyway, priced as an upper bound, or
+            # every cost total built on this log undercounts. The first eval
+            # run lost four calls this way.
+            if _was_answered(exc):
+                append_log(
+                    {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "model": self.model,
+                        "usage_unknown": True,
+                        "error": type(exc).__name__,
+                        "estimated_cost_usd": upper_bound_cost_usd(
+                            self.model, system_blocks, user_message, max_tokens
+                        ),
+                        "latency_ms": int((time.perf_counter() - started) * 1000),
+                        "prompt_sha256": prompt_hash(system_blocks, user_message),
+                    },
+                    log,
+                )
+            raise
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         usage = message.usage

@@ -36,9 +36,13 @@ Rules:
 - Write explicit JOIN ... ON. Never comma-join in the FROM clause.
 - Alias every table and qualify every column with its alias.
 - Only reference tables and columns that appear in the schema below. If the
-  question needs something that is not there, say so in `explanation`, lower
-  `confidence`, and write the closest query you honestly can. Never invent a
-  column name that looks plausible.
+  question needs something that is only partly there, say so in
+  `explanation`, lower `confidence`, and write the closest query you honestly
+  can. If nothing in the schema can answer it at all -- the data the question
+  is about is simply not recorded -- leave `sql` empty, set `confidence` to
+  0.0, and say in `explanation` what is missing. Never invent a column name
+  that looks plausible, and never answer with a stand-in column that measures
+  something else.
 - The column comments in the schema are authoritative about what a column
   holds. Read them before assuming what a business term means -- several
   columns behave differently than their names suggest.

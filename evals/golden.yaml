@@ -149,6 +149,8 @@ questions:
   - id: join_06
     category: join
     question: What category is each product in order 2500 from?
+    # Which id identifies a line is not part of the question.
+    compare_columns: [product, category]
     golden_sql: |
       SELECT oi.order_item_id, p.name AS product, cat.name AS category
       FROM order_items AS oi
@@ -214,6 +216,8 @@ questions:
   - id: agg_05
     category: aggregation
     question: How many refunds did each approver handle, counting auto-approved refunds as their own group?
+    # The auto-approved group may come back as NULL or under any one label.
+    null_label_ok: true
     golden_sql: |
       SELECT r.approved_by, count(*) AS refunds
       FROM refunds AS r

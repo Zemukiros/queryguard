@@ -14,9 +14,13 @@ ranking by the wrong column is exactly the mistake a rewrite exposes.
 
 Comparison rules, in the order they apply:
 
-- Shape first. A different number of columns is *incomparable*: the two queries
-  answer at different granularities, or one adds a label column, and there is
-  no principled way to line them up. A different number of rows is *disagree*.
+- Shape first. A different number of rows is *disagree*. A different number of
+  columns is fine when every column of the narrower result appears, by
+  content, in the wider one -- a name beside an id, a count beside an average
+  -- and the extra columns are ignored. Otherwise it is *incomparable*: the
+  two queries answer at different granularities and cannot be lined up. (The
+  first eval run had this as incomparable outright, and 13 of 40 golden
+  queries drew a false flag from it.)
 - Column names are ignored -- `revenue` and `total_spent` are the same column if
   they hold the same values. Columns are matched by position, or, failing that,
   by content, so `SELECT name, total` agrees with `SELECT total, name`.
@@ -34,7 +38,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
@@ -61,9 +65,13 @@ ABS_TOL = 1e-9
 
 _AGGREGATES = frozenset({"count", "sum", "avg", "min", "max", "array_agg", "string_agg", "bool_and", "bool_or"})
 _ORDERING = re.compile(
-    r"\b(top|most|least|highest|lowest|largest|smallest|biggest|best|worst|first|"
-    r"last|latest|earliest|newest|oldest|rank|ranked|ranking|sorted|ascending|"
-    r"descending|order(?:ed)? by)\b",
+    # Not "first" or "last": "last name", "first quarter" and "first order"
+    # say nothing about row order, and "last name" made a 14-row lookup
+    # compare in order in the first eval run. Not a bare "order by" either:
+    # "orders by country" is a grouping, not a sort.
+    r"\b(top|most|least|highest|lowest|largest|smallest|biggest|best|worst|"
+    r"latest|earliest|newest|oldest|rank|ranked|ranking|sorted|ascending|"
+    r"descending|ordered by|in order of)\b",
     re.IGNORECASE,
 )
 
@@ -238,18 +246,64 @@ def _show(cell: tuple[str, Any]) -> str:
     return repr(value)
 
 
-def compare_results(first: pd.DataFrame, second: pd.DataFrame, *, ordered: bool) -> tuple[str, str]:
-    """(outcome, explanation) for two result sets. Column names are never consulted."""
+def _subset_mapping(narrow: pd.DataFrame, wide: pd.DataFrame, ordered: bool) -> list[int] | None:
+    """A distinct column of `wide` matching each column of `narrow` by content, or None."""
+    unused = set(range(wide.shape[1]))
+    mapping: list[int] = []
+    for i in range(narrow.shape[1]):
+        left = _column(narrow, i)
+        match = next((j for j in sorted(unused) if _columns_match(left, _column(wide, j), ordered)), None)
+        if match is None:
+            return None
+        mapping.append(match)
+        unused.discard(match)
+    return mapping
+
+
+def compare_results(
+    first: pd.DataFrame,
+    second: pd.DataFrame,
+    *,
+    ordered: bool,
+    extra_columns: str = "none",
+) -> tuple[str, str]:
+    """(outcome, explanation) for two result sets. Column names are never consulted.
+
+    `extra_columns` says which side may carry columns the other lacks: "none"
+    (shapes must match), "second" (the second may add columns -- a generated
+    answer against a golden one, which must still contain every golden
+    column), or "either" (two independent answers, either may add a label or
+    a count beside the answer). Extra columns are matched by content: every
+    column of the narrower result must equal a distinct column of the wider.
+    """
+    extra = 0
     if first.shape[1] != second.shape[1]:
-        return INCOMPARABLE, (
-            f"the queries return different columns ({first.shape[1]} vs {second.shape[1]}), "
-            "so their rows cannot be lined up"
+        allowed = extra_columns == "either" or (
+            extra_columns == "second" and second.shape[1] > first.shape[1]
         )
+        if not allowed:
+            return INCOMPARABLE, (
+                f"the queries return different columns ({first.shape[1]} vs {second.shape[1]}), "
+                "so their rows cannot be lined up"
+            )
+        if len(first) != len(second):
+            return DISAGREE, f"the queries return different row counts ({len(first)} vs {len(second)})"
+        narrow_is_first = first.shape[1] < second.shape[1]
+        narrow, wide = (first, second) if narrow_is_first else (second, first)
+        mapping = _subset_mapping(narrow, wide, ordered)
+        if mapping is None:
+            return INCOMPARABLE, (
+                f"the queries return different columns ({first.shape[1]} vs {second.shape[1]}) "
+                "and the narrower result's columns do not all appear in the wider one"
+            )
+        extra = wide.shape[1] - narrow.shape[1]
+        wide = wide.iloc[:, mapping]
+        first, second = (narrow, wide) if narrow_is_first else (wide, narrow)
     if len(first) != len(second):
         return DISAGREE, f"the queries return different row counts ({len(first)} vs {len(second)})"
 
     mapping = _align_columns(first, second, ordered)
-    reordered = mapping != list(range(first.shape[1]))
+    reordered = mapping != list(range(first.shape[1])) or extra > 0
     second = second.iloc[:, mapping]
 
     rows_a = [tuple(_norm(v) for v in row) for row in first.itertuples(index=False, name=None)]
@@ -278,6 +332,8 @@ def compare_results(first: pd.DataFrame, second: pd.DataFrame, *, ordered: bool)
         )
 
     notes = []
+    if extra:
+        notes.append(f"{extra} extra column(s) ignored")
     if reordered:
         notes.append("columns matched by content, not position")
     if rounded:
@@ -329,13 +385,35 @@ def check_agreement(
     if answer.ambiguity.is_ambiguous or not answer.sql:
         return AgreementResult(INCOMPARABLE, "the second query declined to pick a reading", call=call)
 
-    guardrail = check(answer.sql, guardrail_config)
+    result = evaluate_second_sql(
+        question,
+        answer.sql,
+        first_execution,
+        guardrail_config=guardrail_config,
+        executor_config=executor_config,
+    )
+    return replace(result, call=call)
+
+
+def evaluate_second_sql(
+    question: str,
+    second_sql: str,
+    first_execution: ExecutionResult,
+    *,
+    guardrail_config: GuardrailConfig | None = None,
+    executor_config: ExecutorConfig | None = None,
+) -> AgreementResult:
+    """Guard, run and compare a second query that already exists. No API call.
+
+    Split out of check_agreement so a logged second query can be re-evaluated
+    offline when the comparison rules change.
+    """
+    guardrail = check(second_sql, guardrail_config)
     if not guardrail.allowed:
         return AgreementResult(
             INCOMPARABLE,
             f"the second query was blocked by {guardrail.rule}: {guardrail.reason}",
-            second_sql=answer.sql,
-            call=call,
+            second_sql=second_sql,
         )
 
     execution = execute(guardrail.sql_to_execute, executor_config)
@@ -344,20 +422,21 @@ def check_agreement(
         return AgreementResult(
             INCOMPARABLE,
             f"the second query did not run ({execution.outcome}: {detail})",
-            second_sql=answer.sql,
+            second_sql=second_sql,
             second_execution=execution,
-            call=call,
         )
     if first_execution.truncated or execution.truncated:
         return AgreementResult(
             INCOMPARABLE,
             "a result was truncated at the row cap, so the full sets cannot be compared",
-            second_sql=answer.sql,
+            second_sql=second_sql,
             second_execution=execution,
-            call=call,
         )
 
     outcome, explanation = compare_results(
-        first_execution.rows, execution.rows, ordered=implies_ordering(question)
+        first_execution.rows,
+        execution.rows,
+        ordered=implies_ordering(question),
+        extra_columns="either",
     )
-    return AgreementResult(outcome, explanation, answer.sql, execution, call)
+    return AgreementResult(outcome, explanation, second_sql, execution)

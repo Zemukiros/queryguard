@@ -6,9 +6,11 @@
 Three populations, interleaved so a run stopped early still has all three:
 
   generated  all 50 golden questions through run_question (the full pipeline).
-             correct = result matches the golden result (compare_results); for
-             ambiguous items, a clarification; for unanswerable items, a
-             clarification or self-confidence below REFUSAL_CONFIDENCE.
+             correct = result matches the golden result (compare_results, the
+             generated result may add columns but must contain every golden
+             one); for ambiguous items, a clarification; for unanswerable
+             items, a refusal (CannotAnswer), a clarification, or
+             self-confidence below REFUSAL_CONFIDENCE.
   mutation   the 104 known-wrong mutation SQLs through run_answer.  label: wrong
   golden     the 40 golden SQLs through run_answer.                label: correct
 
@@ -17,10 +19,11 @@ INJECTED_SELF_CONFIDENCE and are tagged `self_confidence_source: injected`, so
 self-confidence carries no label information within them; calibration should
 treat it accordingly.
 
-"Refusal" is approximated: GeneratedSQL has no refusal field -- the prompt asks
-for the closest honest query with lowered confidence -- so an unanswerable
-question counts as refused when it draws a clarification or a self-confidence
-below REFUSAL_CONFIDENCE.
+Two golden options loosen the comparison where the golden query is more
+specific than the question: `compare_columns` (only these golden columns must
+appear -- e.g. not the arbitrary row id chosen to identify a line item) and
+`null_label_ok` (a NULL group may come back under a consistent label, e.g.
+COALESCE(approved_by, 'auto-approved')).
 
 Spending guards
 - Every API call is logged to evals/results/<run_id>.llm_calls.jsonl (the
@@ -59,7 +62,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from evals.common import EVALS_DIR, GOLDEN_RESULTS, MUTATION_RESULTS, load_golden, result_hash, run_guarded
-from queryguard.generate import Ambiguity, ClarificationNeeded, GeneratedSQL, Interpretation
+from queryguard.generate import Ambiguity, CannotAnswer, ClarificationNeeded, GeneratedSQL, Interpretation
 from queryguard.llm.client import DEFAULT_MODEL, LLMClient, RequestCapExceeded, estimate_cost_usd
 from queryguard.pipeline import PipelineResult, run_answer, run_question
 from queryguard.schema.introspect import load_schema
@@ -108,6 +111,8 @@ class Item:
     question: str
     golden_id: str
     ordered: bool = False
+    compare_columns: tuple[str, ...] | None = None
+    null_label_ok: bool = False
     sql: str | None = None  # mutation and golden populations
     mutation: str | None = None
     expected_outcome: str | None = None  # ambiguous / unanswerable generated items
@@ -119,7 +124,9 @@ def build_items() -> list[Item]:
     by_id = {e["id"]: e for e in golden}
     generated = [
         Item(f"gen:{e['id']}", GENERATED, e["category"], e["question"], e["id"],
-             ordered=bool(e.get("ordered")), expected_outcome=e.get("expected_outcome"))
+             ordered=bool(e.get("ordered")), expected_outcome=e.get("expected_outcome"),
+             compare_columns=tuple(e["compare_columns"]) if e.get("compare_columns") else None,
+             null_label_ok=bool(e.get("null_label_ok")))
         for e in golden
     ]
     mutations = [
@@ -344,6 +351,8 @@ class FakeSDK:
 def _outcome_kind(outcome: Any) -> str:
     if isinstance(outcome, ClarificationNeeded):
         return "clarification"
+    if isinstance(outcome, CannotAnswer):
+        return "cannot_answer"
     if not outcome.guardrail.allowed:
         return "blocked"
     if not outcome.ok:
@@ -357,6 +366,8 @@ def label_generated(item: Item, outcome: Any, frames: dict) -> tuple[str, str]:
     if item.expected_outcome == "clarification":
         return ("correct", "asked for clarification") if kind == "clarification" else ("wrong", f"{kind} instead of asking")
     if item.expected_outcome == "refusal_or_clarification":
+        if kind == "cannot_answer":
+            return "correct", f"refused: {outcome.explanation}"
         if kind == "clarification":
             return "correct", "asked for clarification"
         confidence = outcome.answer.confidence
@@ -365,8 +376,41 @@ def label_generated(item: Item, outcome: Any, frames: dict) -> tuple[str, str]:
         return "wrong", f"{kind} with self-confidence {confidence:.2f} for an unanswerable question"
     if kind != "executed":
         return "wrong", kind
-    verdict, explanation = compare_results(frames[item.golden_id], outcome.execution.rows, ordered=item.ordered)
+    verdict, explanation = compare_to_golden(item, frames[item.golden_id], outcome.execution.rows)
     return ("correct" if verdict == AGREE else "wrong"), f"{verdict}: {explanation}"
+
+
+def _label_nulls(golden, generated):
+    """Fill golden NULLs in a text column with the one label the generated result adds.
+
+    COALESCE(approved_by, 'auto-approved') answers "count auto-approved
+    refunds as their own group" exactly; only the label differs from NULL.
+    """
+    golden = golden.copy()
+    generated_text = {
+        v for col in generated.columns for v in generated[col].tolist() if isinstance(v, str)
+    }
+    golden_text = {
+        v for col in golden.columns for v in golden[col].tolist() if isinstance(v, str)
+    }
+    labels = generated_text - golden_text
+    if len(labels) != 1:
+        return golden
+    (label,) = labels
+    for col in golden.columns:
+        values = golden[col].tolist()
+        if any(isinstance(v, str) for v in values) and golden[col].isna().any():
+            golden[col] = golden[col].astype(object).where(golden[col].notna(), label)
+    return golden
+
+
+def compare_to_golden(item: Item, golden, generated) -> tuple[str, str]:
+    """compare_results, with the generated side allowed to add columns."""
+    if item.compare_columns:
+        golden = golden[list(item.compare_columns)]
+    if item.null_label_ok:
+        golden = _label_nulls(golden, generated)
+    return compare_results(golden, generated, ordered=item.ordered, extra_columns="second")
 
 
 def _detectors(outcome: Any) -> dict:
@@ -556,7 +600,8 @@ def report(results_path: Path, profile: dict, budget: Budget, dry_run: bool) -> 
 
     title = "PROJECTION (dry run: mean real tokens per step)" if dry_run else "RESULTS"
     print(f"\n{title}")
-    header = f"{'population':<11}{'items':>6}{'gen':>6}{'bt':>6}{'judge':>7}{'2nd':>6}{'calls':>7}{'expected $':>12}{'high $':>9}{'correct':>9}{'wrong':>7}"
+    cost_header = "expected $" if dry_run else "cost $"
+    header = f"{'population':<11}{'items':>6}{'gen':>6}{'bt':>6}{'judge':>7}{'2nd':>6}{'calls':>7}{cost_header:>12}{'high $':>9}{'correct':>9}{'wrong':>7}"
     print(header)
     total_calls = total_cost = total_high = 0.0
     for pop in (GENERATED, MUTATION, GOLDEN):
@@ -578,6 +623,20 @@ def report(results_path: Path, profile: dict, budget: Budget, dry_run: bool) -> 
         for s in STEPS:
             p = profile[s]
             print(f"  {s:<15} n={p['samples']:<3} mean usage {p['mean_usage']}  mean ${p['mean_cost']:.4f}  max ${p['max_cost']:.4f}")
+
+
+def final_status(stop_reason: str, unfinished: list[str]) -> tuple[str, int]:
+    """(stop reason, exit code). Exit 0 only when every item has a row.
+
+    The queue can run dry with items missing -- errors, or transient failures
+    past MAX_ATTEMPTS. The first live run printed "all items finished" and
+    exited 0 in exactly that state.
+    """
+    if not unfinished:
+        return stop_reason, 0
+    if stop_reason == "all items finished":
+        stop_reason = "queue exhausted with items unfinished (errors or retries exhausted)"
+    return stop_reason, 3
 
 
 class _DropHaikuCacheFloorWarning(logging.Filter):
@@ -638,10 +697,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{'DRY RUN' if dry_run else 'LIVE'} {run_id}: {len(items)} items, "
           f"{len(finished_ids(results_path))} already finished")
     stop_reason = run(items, ctx, args.concurrency)
-    unfinished = len(items) - len(finished_ids(results_path) & {i.id for i in items})
-    print(f"\nstopped: {stop_reason}" + (f" ({unfinished} items unfinished)" if unfinished else ""))
+    unfinished = sorted({i.id for i in items} - finished_ids(results_path))
+    stop_reason, exit_code = final_status(stop_reason, unfinished)
+    print(f"\nstopped: {stop_reason}")
+    if unfinished:
+        print(f"unfinished ({len(unfinished)}): {', '.join(unfinished)} -- re-run the same --run-id to retry them")
     report(results_path, profile, budget, dry_run)
-    return 0 if stop_reason == "all items finished" else 3
+    return exit_code
 
 
 if __name__ == "__main__":

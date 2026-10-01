@@ -320,7 +320,6 @@ def test_pricing_ids_carry_no_date_suffix() -> None:
     [
         ("confidence", 1.5),
         ("confidence", -0.1),
-        ("sql", "   "),
         ("sql", "DROP TABLE orders;"),
         ("sql", "UPDATE orders SET status = 'paid';"),
         ("sql", "-- harmless looking\nDELETE FROM orders;"),
@@ -462,22 +461,39 @@ def test_two_or_three_interpretations_are_accepted(count) -> None:
     assert len(Ambiguity(**_ambiguity_payload(count)).interpretations) == count
 
 
-def test_empty_top_level_sql_is_allowed_only_when_ambiguous() -> None:
-    """`sql` is mandatory exactly when a single reading was actually chosen."""
+def test_empty_top_level_sql_is_a_clarification_or_a_refusal() -> None:
+    """Empty `sql` is an answer either way; which one depends on `ambiguity`.
+
+    It used to be rejected unless ambiguous, which turned the model's refusals
+    of unanswerable questions into parse failures in the first eval run.
+    """
     base = {
-        "explanation": "e",
+        "explanation": "No delivery timestamp is recorded.",
         "confidence": 0.0,
         "tables_used": [],
         "columns_used": [],
         "assumptions": [],
     }
 
-    assert GeneratedSQL(sql="", ambiguity=_ambiguity_payload(2), **base).sql == ""
+    ambiguous = GeneratedSQL(sql="", ambiguity=_ambiguity_payload(2), **base)
+    assert ambiguous.sql == "" and not ambiguous.is_refusal
 
-    with pytest.raises(ValidationError):
-        GeneratedSQL(
-            sql="", ambiguity={"is_ambiguous": False, "interpretations": []}, **base
-        )
+    refusal = GeneratedSQL(sql="   ", ambiguity={"is_ambiguous": False, "interpretations": []}, **base)
+    assert refusal.sql == "" and refusal.is_refusal
+
+
+def test_a_refusal_comes_back_as_cannot_answer() -> None:
+    from queryguard.generate import CannotAnswer, generate_sql_with_stats
+
+    refusal = GeneratedSQL(
+        sql="", explanation="There is no warehouse data.", confidence=0.0,
+        tables_used=[], columns_used=[], assumptions=[],
+        ambiguity={"is_ambiguous": False, "interpretations": []},
+    )
+    answer, _ = generate_sql_with_stats(
+        "Which warehouse ships the most?", client=LLMClient(sdk_client=FakeAnthropic(refusal)), schema=_synthetic_schema()
+    )
+    assert answer == CannotAnswer(question="Which warehouse ships the most?", explanation="There is no warehouse data.")
 
 
 def test_an_interpretation_may_not_smuggle_in_a_write() -> None:
@@ -539,3 +555,41 @@ def test_cli_exit_code_distinguishes_a_clarification_from_a_query(
 
     assert code == expected_code
     assert expected_text in capsys.readouterr().out
+
+
+def test_a_response_that_fails_to_parse_is_still_logged_at_an_upper_bound(tmp_path) -> None:
+    """The SDK raises before returning usage; the call was still made and billed."""
+    from queryguard.llm.client import upper_bound_cost_usd
+
+    class Exploding:
+        class messages:
+            @staticmethod
+            def parse(**kwargs):
+                raise ValueError("1 validation error for GeneratedSQL")
+
+    log = tmp_path / "calls.jsonl"
+    client = LLMClient(sdk_client=Exploding())
+    blocks = [{"type": "text", "text": "x" * 4000}]
+    with pytest.raises(ValueError):
+        client.complete(blocks, "Q: ?", output_format=GeneratedSQL, max_tokens=4096, log=log)
+
+    [entry] = [json.loads(line) for line in log.read_text().splitlines()]
+    assert entry["usage_unknown"] is True and entry["error"] == "ValueError"
+    assert entry["estimated_cost_usd"] == upper_bound_cost_usd("claude-sonnet-5", blocks, "Q: ?", 4096)
+    assert entry["estimated_cost_usd"] > 4096 * 10 / 1_000_000, "at least the full output allowance"
+
+
+def test_a_connection_error_is_not_logged_as_a_billed_call(tmp_path) -> None:
+    import anthropic
+    import httpx2
+
+    class Offline:
+        class messages:
+            @staticmethod
+            def parse(**kwargs):
+                raise anthropic.APIConnectionError(request=httpx2.Request("POST", "https://api.anthropic.com"))
+
+    log = tmp_path / "calls.jsonl"
+    with pytest.raises(anthropic.APIConnectionError):
+        LLMClient(sdk_client=Offline()).complete([], "Q: ?", output_format=GeneratedSQL, log=log)
+    assert not log.exists()

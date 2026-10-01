@@ -104,7 +104,10 @@ class GeneratedSQL(BaseModel):
     """The model's answer, as a typed object rather than prose."""
 
     sql: str = Field(
-        description="A single PostgreSQL SELECT or WITH ... SELECT. Empty when ambiguous."
+        description=(
+            "A single PostgreSQL SELECT or WITH ... SELECT. Empty when ambiguous, "
+            "or when nothing in the schema can answer the question."
+        )
     )
     explanation: str = Field(description="One or two sentences on how it answers the question.")
     confidence: float = Field(ge=0.0, le=1.0, description="0-1 self-estimate.")
@@ -119,17 +122,23 @@ class GeneratedSQL(BaseModel):
         return value.strip()
 
     @model_validator(mode="after")
-    def _sql_required_unless_ambiguous(self) -> GeneratedSQL:
-        """`sql` is mandatory only when a single reading was actually chosen.
+    def _sql_is_a_select_when_present(self) -> GeneratedSQL:
+        """An empty `sql` is an answer, not an error.
 
-        Whether an empty `sql` is a bug or the correct answer depends on
-        `ambiguity`, and a field validator cannot see a sibling field -- hence
-        the check lives here rather than on `sql` itself.
+        Empty means either "ambiguous" (see `ambiguity`) or "the schema cannot
+        answer this" -- a refusal. Rejecting it, as this validator once did,
+        turned four correct refusals in the first eval run into crashes: the
+        model declined to invent a warehouse table, and the parse failed.
+        Anything non-empty must still be a single SELECT.
         """
-        if self.ambiguity.is_ambiguous:
-            return self
-        _must_be_a_single_select(self.sql, field="sql")
+        if self.sql:
+            _must_be_a_single_select(self.sql, field="sql")
         return self
+
+    @property
+    def is_refusal(self) -> bool:
+        """No SQL and no competing readings: the schema cannot answer it."""
+        return not self.sql and not self.ambiguity.is_ambiguous
 
 
 @dataclass(frozen=True)
@@ -144,9 +153,22 @@ class ClarificationNeeded:
     interpretations: list[Interpretation]
 
 
+@dataclass(frozen=True)
+class CannotAnswer:
+    """Returned instead of SQL when nothing in the schema can answer the question.
+
+    A distinct type for the same reason as ClarificationNeeded: there is no
+    `.sql` to run by mistake. Different from a clarification -- asking again,
+    or more precisely, does not help.
+    """
+
+    question: str
+    explanation: str
+
+
 def generate_sql_with_stats(
     question: str, *, client: LLMClient | None = None, schema: Any = None
-) -> tuple[GeneratedSQL | ClarificationNeeded, CallResult]:
+) -> tuple[GeneratedSQL | ClarificationNeeded | CannotAnswer, CallResult]:
     """generate_sql, plus the call's usage and cost for the CLI to report."""
     llm = client or LLMClient()
     result = llm.complete(
@@ -170,10 +192,12 @@ def generate_sql_with_stats(
             ),
             result,
         )
+    if answer.is_refusal:
+        return CannotAnswer(question=question, explanation=answer.explanation), result
     return answer, result
 
 
-def generate_sql(question: str) -> GeneratedSQL | ClarificationNeeded:
+def generate_sql(question: str) -> GeneratedSQL | ClarificationNeeded | CannotAnswer:
     """Generate SQL for a question. Does not execute it.
 
     Returns ClarificationNeeded when the question has more than one defensible
@@ -235,7 +259,9 @@ def _render_clarification(answer: ClarificationNeeded, result: CallResult) -> st
     return "\n".join(lines + _footer(result))
 
 
-def _as_json(question: str, answer: GeneratedSQL | ClarificationNeeded, result: CallResult) -> str:
+def _as_json(
+    question: str, answer: GeneratedSQL | ClarificationNeeded | CannotAnswer, result: CallResult
+) -> str:
     """Machine-readable form, tagged so a consumer can branch without parsing prose."""
     usage = result.usage
     payload: dict[str, Any] = {
@@ -252,6 +278,9 @@ def _as_json(question: str, answer: GeneratedSQL | ClarificationNeeded, result: 
     if isinstance(answer, ClarificationNeeded):
         payload["kind"] = "clarification"
         payload["interpretations"] = [option.model_dump() for option in answer.interpretations]
+    elif isinstance(answer, CannotAnswer):
+        payload["kind"] = "cannot_answer"
+        payload["explanation"] = answer.explanation
     else:
         payload["kind"] = "sql"
         payload |= answer.model_dump()
@@ -264,6 +293,7 @@ EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_CAP_EXCEEDED = 2
 EXIT_CLARIFICATION_NEEDED = 3
+EXIT_CANNOT_ANSWER = 4
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -273,6 +303,7 @@ def main(argv: list[str] | None = None) -> int:
         epilog=(
             f"exit codes: {EXIT_OK} a single query, "
             f"{EXIT_CLARIFICATION_NEEDED} clarification needed, "
+            f"{EXIT_CANNOT_ANSWER} cannot answer from this schema, "
             f"{EXIT_ERROR} error, {EXIT_CAP_EXCEEDED} request cap exceeded"
         ),
     )
@@ -302,14 +333,16 @@ def main(argv: list[str] | None = None) -> int:
         print(_as_json(args.question, answer, result))
     elif isinstance(answer, ClarificationNeeded):
         print(_render_clarification(answer, result))
+    elif isinstance(answer, CannotAnswer):
+        print("\n".join([f"Q: {answer.question}", "", f"CANNOT ANSWER: {answer.explanation}"] + _footer(result)))
     else:
         print(_render(args.question, answer, result))
 
-    return (
-        EXIT_CLARIFICATION_NEEDED
-        if isinstance(answer, ClarificationNeeded)
-        else EXIT_OK
-    )
+    if isinstance(answer, ClarificationNeeded):
+        return EXIT_CLARIFICATION_NEEDED
+    if isinstance(answer, CannotAnswer):
+        return EXIT_CANNOT_ANSWER
+    return EXIT_OK
 
 
 if __name__ == "__main__":

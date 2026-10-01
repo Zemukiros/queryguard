@@ -8,6 +8,8 @@ apart:
   ClarificationNeeded is returned *unchanged* -- no SQL was chosen, so there is
   nothing to guard or execute, and wrapping it would invite a caller to go
   looking for a `.sql` that does not exist.
+- Nothing in the schema can answer it. CannotAnswer is returned unchanged, for
+  the same reason.
 - The model produced SQL the guardrail refused. There is a query to show and a
   named rule to explain it, but nothing ran.
 - The query ran, or the database refused it.
@@ -35,7 +37,12 @@ from typing import Any
 import anthropic
 
 from queryguard.executor import ExecutionResult, ExecutorConfig, execute
-from queryguard.generate import ClarificationNeeded, GeneratedSQL, generate_sql_with_stats
+from queryguard.generate import (
+    CannotAnswer,
+    ClarificationNeeded,
+    GeneratedSQL,
+    generate_sql_with_stats,
+)
 from queryguard.guardrails import GuardrailConfig, GuardrailResult, check
 from queryguard.llm.client import CallResult, LLMClient, RequestCapExceeded
 from queryguard.schema.introspect import load_schema
@@ -135,7 +142,7 @@ def run_question(
     guardrail_config: GuardrailConfig | None = None,
     executor_config: ExecutorConfig | None = None,
     validate: bool = True,
-) -> PipelineResult | ClarificationNeeded:
+) -> PipelineResult | ClarificationNeeded | CannotAnswer:
     """Generate SQL for a question, guard it, run it read-only, and check it.
 
     `client` (Sonnet: generation and the second query) and `validation_client`
@@ -152,7 +159,7 @@ def run_question(
     budget.spend("generate")
     answer, call = generate_sql_with_stats(question, client=client, schema=schema)
 
-    if isinstance(answer, ClarificationNeeded):
+    if isinstance(answer, (ClarificationNeeded, CannotAnswer)):
         return answer
 
     return run_answer(
@@ -337,6 +344,7 @@ EXIT_ERROR = 1
 EXIT_CAP_EXCEEDED = 2
 EXIT_CLARIFICATION_NEEDED = 3
 EXIT_BLOCKED = 4
+EXIT_CANNOT_ANSWER = 5
 
 
 def _render(result: PipelineResult) -> str:
@@ -390,7 +398,8 @@ def main(argv: list[str] | None = None) -> int:
         description="Ask a question in English; get rows from the read-only role.",
         epilog=(
             "exit codes: 0 ok · 1 error · 2 request cap reached · "
-            "3 clarification needed · 4 blocked by a guardrail"
+            "3 clarification needed · 4 blocked by a guardrail · "
+            "5 cannot be answered from this schema"
         ),
     )
     parser.add_argument("question", help="the question to answer")
@@ -410,6 +419,9 @@ def main(argv: list[str] | None = None) -> int:
         for interpretation in outcome.interpretations:
             print(f"[{interpretation.label}] {interpretation.explanation}\n{interpretation.sql}\n")
         return EXIT_CLARIFICATION_NEEDED
+    if isinstance(outcome, CannotAnswer):
+        print(f"Cannot answer from this schema: {outcome.explanation}")
+        return EXIT_CANNOT_ANSWER
 
     print(_render(outcome))
     if not outcome.guardrail.allowed:

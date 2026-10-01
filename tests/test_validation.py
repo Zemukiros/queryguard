@@ -514,3 +514,66 @@ def test_every_scored_run_is_logged_as_a_training_row(tmp_path) -> None:
     assert row["encoded"]["agreement_disagree"] == 1.0
     assert row["confidence"] == pytest.approx(confidence)
     assert row["label"] is None, "left for a human or eval suite to fill in"
+
+
+# ------------------------------------------- extra columns (first eval run fix)
+
+
+def test_either_side_may_add_columns_when_the_rest_matches() -> None:
+    narrow = pd.DataFrame({"category": ["Apparel", "Books"], "n": [31, 18]})
+    wide = pd.DataFrame({"id": [3, 5], "name": ["Apparel", "Books"], "count": [31, 18]})
+    for first, second in ((narrow, wide), (wide, narrow)):
+        outcome, explanation = compare_results(first, second, ordered=False, extra_columns="either")
+        assert outcome == AGREE
+        assert "1 extra column(s) ignored" in explanation
+
+
+def test_by_default_a_different_width_is_still_incomparable() -> None:
+    narrow = pd.DataFrame({"n": [1]})
+    assert compare_results(narrow, narrow.assign(x=2), ordered=False)[0] == INCOMPARABLE
+
+
+def test_second_may_add_columns_but_never_drop_them() -> None:
+    golden = pd.DataFrame({"id": [1, 2], "total": [Decimal("5.00"), Decimal("7.00")]})
+    generated = golden.assign(name=["a", "b"])
+    assert compare_results(golden, generated, ordered=False, extra_columns="second")[0] == AGREE
+    assert compare_results(generated, golden, ordered=False, extra_columns="second")[0] == INCOMPARABLE
+
+
+def test_extra_columns_do_not_hide_a_wrong_value() -> None:
+    golden = pd.DataFrame({"id": [1, 2], "total": [Decimal("5.00"), Decimal("7.00")]})
+    generated = pd.DataFrame({"id": [1, 2], "name": ["a", "b"], "total": [Decimal("5.00"), Decimal("9.99")]})
+    outcome, explanation = compare_results(golden, generated, ordered=False, extra_columns="second")
+    assert outcome == INCOMPARABLE
+    assert "do not all appear" in explanation
+
+
+def test_a_row_count_difference_with_extra_columns_is_disagreement() -> None:
+    first = pd.DataFrame({"n": [1, 2]})
+    second = pd.DataFrame({"n": [1], "label": ["x"]})
+    assert compare_results(first, second, ordered=False, extra_columns="either")[0] == DISAGREE
+
+
+def test_last_name_and_first_quarter_do_not_imply_ordering() -> None:
+    """'last name' made a 14-row lookup compare in order in the first eval run."""
+    assert not implies_ordering(
+        "List every order placed by customer 42 with its date, total and the customer's last name."
+    )
+    assert not implies_ordering("How many orders in the first quarter of 2026?")
+    assert not implies_ordering("Count orders by country")
+    assert implies_ordering("Which 5 customers spent the most?")
+    assert implies_ordering("List products ordered by price")
+
+
+def test_a_logged_second_query_can_be_re_evaluated_without_the_api(monkeypatch) -> None:
+    from queryguard.validation.agreement import evaluate_second_sql
+
+    second = pd.DataFrame({"name": ["Mia"], "n": pd.Series([812], dtype="int64")})
+    monkeypatch.setattr("queryguard.validation.agreement.execute", lambda *a, **k: _ok(second))
+    result = evaluate_second_sql(
+        "How many orders were cancelled?",
+        "SELECT 'Mia' AS name, count(*) AS n FROM orders AS o JOIN customers AS c ON true",
+        _ok(pd.DataFrame({"cancelled": pd.Series([812], dtype="int64")})),
+    )
+    assert result.outcome == AGREE
+    assert result.call is None
