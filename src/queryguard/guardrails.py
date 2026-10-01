@@ -262,15 +262,21 @@ def _row_caps(statement: Statement) -> list[tuple[str, str | None]]:
 
 
 def _append_limit(sql: str, max_rows: int) -> str:
-    """Cap an uncapped query.
+    """Cap an uncapped query at max_rows + 1.
+
+    The extra row is not a loophole, it is the overflow signal. The executor
+    reads one row past its own cap to report `truncated`; capped at exactly
+    max_rows here, the database never has that row to give, and a query that
+    matched 5000 rows comes back as a clean 1000 with truncated=False -- a
+    silently partial answer. The executor still returns at most max_rows.
 
     The trailing-noise strip is what makes this correct: every few-shot example
-    ends in a semicolon, and `... ORDER BY o.order_date DESC; LIMIT 1000` is two
+    ends in a semicolon, and `... ORDER BY o.order_date DESC; LIMIT 1001` is two
     statements, the second of them nonsense. The newline matters for the same
     reason -- appended to the end of a line holding a `--` comment, the cap would
     be commented out.
     """
-    return f"{_TRAILING_NOISE.sub('', sql)}\nLIMIT {max_rows}"
+    return f"{_TRAILING_NOISE.sub('', sql)}\nLIMIT {max_rows + 1}"
 
 
 # ----------------------------------------------------------------------- rules
@@ -420,7 +426,13 @@ def _check_row_limit(
     is expensive whatever the outer query then selects from it -- while the
     rewrite looks only at the outermost query, which is the one whose row count
     reaches this process.
+
+    The ceiling is max_rows + 1, not max_rows, because that is the cap
+    `_append_limit` writes: a rewritten query has to pass its own re-check. The
+    extra row never reaches a caller -- the executor returns at most max_rows
+    and uses the one beyond it only to report truncation.
     """
+    ceiling = config.max_rows + 1
     for clause, literal in _row_caps(statement):
         if literal is None:
             return _reject(sql, "row_limit", f"{clause} with no value")
@@ -433,7 +445,7 @@ def _check_row_limit(
                 f"{clause} value {literal!r} is not a literal integer, so it "
                 "cannot be verified against the row cap",
             )
-        if int(literal) > config.max_rows:
+        if int(literal) > ceiling:
             return _reject(
                 sql,
                 "row_limit",

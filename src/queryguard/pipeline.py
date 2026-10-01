@@ -71,6 +71,7 @@ def run_question(
     if isinstance(answer, ClarificationNeeded):
         return answer
 
+    guardrail_config = guardrail_config or GuardrailConfig()
     guardrail = check(answer.sql, guardrail_config)
     if not guardrail.allowed:
         # Deliberately no execution attempt. The guardrail is the gate, not a
@@ -79,6 +80,10 @@ def run_question(
             question=question, answer=answer, guardrail=guardrail, call=call
         )
 
+    # The guardrail caps at max_rows + 1 so the executor can see overflow; the
+    # two caps have to agree or that extra row comes back as data.
+    if executor_config is None:
+        executor_config = ExecutorConfig(max_rows=guardrail_config.max_rows)
     execution = execute(guardrail.sql_to_execute, executor_config)
     return PipelineResult(
         question=question,

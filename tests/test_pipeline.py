@@ -158,10 +158,40 @@ def test_a_missing_limit_is_added_on_the_way_through(live_database) -> None:
     outcome, _ = _run(model_sql)
 
     assert outcome.answer.sql == model_sql
-    assert outcome.guardrail.rewritten_sql == f"{model_sql}\nLIMIT {DEFAULT_MAX_ROWS}"
+    assert outcome.guardrail.rewritten_sql == f"{model_sql}\nLIMIT {DEFAULT_MAX_ROWS + 1}"
     assert outcome.sql == outcome.guardrail.rewritten_sql
     assert outcome.ok
     assert outcome.execution.row_count == DEFAULT_MAX_ROWS
+    assert outcome.execution.truncated, "orders holds 5000 rows; 1000 is not all of them"
+
+
+def test_an_overflowing_result_is_reported_as_truncated(live_database) -> None:
+    """The guardrail lets one row past the cap so the executor can see it.
+
+    Capped at exactly max_rows, the database had no 1001st row to offer, and a
+    15k-row answer came back as a complete-looking 1000 with truncated=False.
+    """
+    fake = FakeAnthropic(_answer("SELECT * FROM order_items;"))
+    outcome = run_question(
+        "List every order item",
+        client=LLMClient(sdk_client=fake),
+        schema=_synthetic_schema(),
+    )
+
+    assert outcome.ok, outcome.execution.error_message
+    assert outcome.sql.endswith(f"LIMIT {DEFAULT_MAX_ROWS + 1}")
+    assert outcome.execution.row_count == DEFAULT_MAX_ROWS
+    assert len(outcome.execution.rows) == DEFAULT_MAX_ROWS
+    assert outcome.execution.truncated is True
+
+
+def test_a_smaller_guardrail_cap_carries_through_to_the_executor(live_database) -> None:
+    """Without an executor config the two caps agree, so the extra row is not data."""
+    outcome, _ = _run("SELECT order_id FROM orders", guardrail_config=GuardrailConfig(max_rows=10))
+
+    assert outcome.sql.endswith("LIMIT 11")
+    assert outcome.execution.row_count == 10
+    assert outcome.execution.truncated
 
 
 def test_the_pipeline_reports_the_cost_of_the_call(live_database) -> None:

@@ -199,8 +199,9 @@ def test_a_limit_lowers_the_estimate_and_the_query_is_allowed(live_database) -> 
     capped = check(raw)
     result = execute(capped.sql_to_execute)
     assert result.ok, result.error_message
-    assert result.estimated_rows == 1000.0
+    assert result.estimated_rows == DEFAULT_MAX_ROWS + 1.0
     assert result.row_count == DEFAULT_MAX_ROWS
+    assert result.truncated, "the extra row the guardrail allowed is the overflow signal"
 
 
 def test_the_estimate_bounds_rows_returned_not_work_done(live_database) -> None:

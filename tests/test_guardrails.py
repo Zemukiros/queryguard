@@ -192,13 +192,13 @@ def test_a_column_named_updated_at_does_not_look_like_an_update() -> None:
     """The reason the rules read tokens: substring matching rejects this."""
     sql = "SELECT o.updated_at FROM orders AS o WHERE o.updated_at > now()"
     result = _assert_allowed(sql)
-    assert result.rewritten_sql == f"{sql}\nLIMIT {DEFAULT_MAX_ROWS}", "only the cap should change"
+    assert result.rewritten_sql == f"{sql}\nLIMIT {DEFAULT_MAX_ROWS + 1}", "only the cap should change"
 
 
 def test_a_string_literal_containing_drop_is_not_a_drop() -> None:
     sql = "SELECT o.id FROM orders AS o WHERE o.note = 'DROP TABLE users'"
     result = _assert_allowed(sql)
-    assert result.rewritten_sql == f"{sql}\nLIMIT {DEFAULT_MAX_ROWS}", "only the cap should change"
+    assert result.rewritten_sql == f"{sql}\nLIMIT {DEFAULT_MAX_ROWS + 1}", "only the cap should change"
 
 
 def test_ordinary_column_and_alias_names_survive_the_keyword_rules() -> None:
@@ -258,6 +258,12 @@ def test_a_limit_at_the_maximum_is_accepted_untouched() -> None:
     assert result.rewritten_sql is None
 
 
+def test_the_overflow_row_the_rewrite_adds_is_within_the_ceiling() -> None:
+    """max_rows + 1 is what _append_limit writes, so it must pass a re-check."""
+    _assert_allowed(f"SELECT id FROM orders LIMIT {DEFAULT_MAX_ROWS + 1}")
+    _assert_rejected(f"SELECT id FROM orders LIMIT {DEFAULT_MAX_ROWS + 2}", "row_limit")
+
+
 def test_an_oversized_limit_inside_a_cte_is_rejected() -> None:
     """The outer query is capped, but the CTE still materialises 50k rows."""
     sql = "WITH c AS (SELECT * FROM orders LIMIT 50000) SELECT * FROM c LIMIT 10"
@@ -274,14 +280,14 @@ def test_a_non_literal_limit_cannot_be_verified_and_is_rejected() -> None:
 
 def test_a_missing_limit_is_rewritten_not_rejected() -> None:
     result = _assert_allowed("SELECT id FROM orders")
-    assert result.rewritten_sql == f"SELECT id FROM orders\nLIMIT {DEFAULT_MAX_ROWS}"
+    assert result.rewritten_sql == f"SELECT id FROM orders\nLIMIT {DEFAULT_MAX_ROWS + 1}"
 
 
 def test_the_rewrite_survives_a_trailing_order_by() -> None:
     sql = "SELECT o.id FROM orders AS o ORDER BY o.order_date DESC;"
     result = _assert_allowed(sql)
     _assert_valid_capped_select(result.rewritten_sql)
-    assert result.rewritten_sql.endswith(f"DESC\nLIMIT {DEFAULT_MAX_ROWS}")
+    assert result.rewritten_sql.endswith(f"DESC\nLIMIT {DEFAULT_MAX_ROWS + 1}")
 
 
 def test_the_rewrite_caps_the_outer_query_of_a_cte_not_the_cte_body() -> None:
@@ -289,7 +295,7 @@ def test_the_rewrite_caps_the_outer_query_of_a_cte_not_the_cte_body() -> None:
     sql = "WITH c AS (SELECT * FROM orders LIMIT 10) SELECT * FROM c;"
     result = _assert_allowed(sql)
     _assert_valid_capped_select(result.rewritten_sql)
-    assert result.rewritten_sql.endswith(f"SELECT * FROM c\nLIMIT {DEFAULT_MAX_ROWS}")
+    assert result.rewritten_sql.endswith(f"SELECT * FROM c\nLIMIT {DEFAULT_MAX_ROWS + 1}")
 
 
 def test_the_rewrite_strips_the_trailing_semicolon() -> None:
@@ -323,7 +329,7 @@ def test_auto_limit_off_rejects_an_uncapped_query_instead_of_rewriting_it() -> N
 def test_max_rows_is_configurable() -> None:
     tight = GuardrailConfig(max_rows=10)
     _assert_rejected("SELECT id FROM orders LIMIT 50", "row_limit", tight)
-    assert _assert_allowed("SELECT id FROM orders", tight).rewritten_sql.endswith("LIMIT 10")
+    assert _assert_allowed("SELECT id FROM orders", tight).rewritten_sql.endswith("LIMIT 11")
 
 
 # --------------------------------------------------------------------- comments
@@ -346,7 +352,7 @@ def test_comments_can_be_allowed_and_the_cap_still_lands_outside_them() -> None:
     result = _assert_allowed(
         "SELECT id FROM orders -- a note", GuardrailConfig(allow_comments=True)
     )
-    assert result.rewritten_sql == f"SELECT id FROM orders\nLIMIT {DEFAULT_MAX_ROWS}"
+    assert result.rewritten_sql == f"SELECT id FROM orders\nLIMIT {DEFAULT_MAX_ROWS + 1}"
 
 
 # ----------------------------------------------------------------------- result
@@ -413,7 +419,7 @@ def test_every_few_shot_example_passes_the_guardrails(name, sql) -> None:
     if result.rewritten_sql is None:
         assert "LIMIT" in sql.upper(), f"{name} was left alone but has no LIMIT"
     else:
-        assert result.rewritten_sql == f"{sql.rstrip().rstrip(';')}\nLIMIT {DEFAULT_MAX_ROWS}"
+        assert result.rewritten_sql == f"{sql.rstrip().rstrip(';')}\nLIMIT {DEFAULT_MAX_ROWS + 1}"
         _assert_valid_capped_select(result.rewritten_sql)
 
 

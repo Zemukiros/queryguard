@@ -24,8 +24,8 @@ Four nested boundaries, outermost first:
 What layer 4 does *not* do is bound work, only rows returned. `SELECT count(*)
 FROM order_items a CROSS JOIN order_items b` estimates one row, because one row
 is what it returns, and the 225-million-row join happens anyway. A LIMIT has the
-same effect from the other direction: the guardrail's appended `LIMIT 1000` turns
-that cross join's root estimate into 1000 and the query is allowed -- correctly,
+same effect from the other direction: the guardrail's appended `LIMIT 1001` turns
+that cross join's root estimate into 1001 and the query is allowed -- correctly,
 as it happens, since PostgreSQL stops the join early. `statement_timeout` is the
 only thing here that bounds cost rather than volume, which is why it is not
 optional. `tests/test_executor.py` pins both behaviours so neither is a surprise.
