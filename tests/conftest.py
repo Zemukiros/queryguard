@@ -8,6 +8,7 @@ the pure-rendering tests still run, so the suite is never vacuous.
 
 from __future__ import annotations
 
+import anthropic
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -45,3 +46,24 @@ def live_database() -> None:
             f"queryguard-db not reachable as queryguard_ro, "
             f"run `docker compose up -d` ({exc})"
         )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_api_and_no_real_logs(tmp_path, monkeypatch):
+    """No test may reach the API or write to logs/.
+
+    A component that builds its own LLMClient when none is injected would
+    otherwise construct a real anthropic.Anthropic -- and with a key in .env,
+    spend money on every run. This happened once (Phase 3 part 2, 16 Haiku
+    calls) before this fixture existed; constructing the SDK client now fails
+    the test instead. logs/confidence_features.jsonl is calibration training
+    data, so a test run writing fake rows into it would be worse than a crash.
+    """
+
+    def _refuse(*args, **kwargs):
+        raise RuntimeError("a test tried to construct a real anthropic.Anthropic; inject a fake")
+
+    monkeypatch.setattr(anthropic, "Anthropic", _refuse)
+    monkeypatch.setenv("QUERYGUARD_LLM_LOG", str(tmp_path / "llm_calls.jsonl"))
+    monkeypatch.setenv("QUERYGUARD_EXECUTOR_LOG", str(tmp_path / "executions.jsonl"))
+    monkeypatch.setenv("QUERYGUARD_CONFIDENCE_LOG", str(tmp_path / "confidence_features.jsonl"))

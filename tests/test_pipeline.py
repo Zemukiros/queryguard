@@ -14,6 +14,7 @@ answered by nobody, so the tests that reach that far take `live_database`.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -29,16 +30,26 @@ from queryguard.executor import (
 from queryguard.generate import Ambiguity, ClarificationNeeded, GeneratedSQL, Interpretation
 from queryguard.guardrails import DEFAULT_MAX_ROWS, GuardrailConfig
 from queryguard.llm.client import LLMClient, reset_request_count
-from queryguard.pipeline import PipelineResult, run_question
+from queryguard.pipeline import (
+    MAX_CALLS_PER_QUESTION,
+    PipelineResult,
+    QuestionBudget,
+    QuestionBudgetExceeded,
+    run_answer,
+    run_question,
+)
 from queryguard.schema.introspect import ColumnInfo, DatabaseSchema, TableInfo
+from queryguard.validation.backtranslate import (
+    VALIDATION_MODEL,
+    AlignmentJudgement,
+    BackTranslation,
+)
 from queryguard.validation.sanity import CHECK_EMPTY, WARN
 
 
 @pytest.fixture(autouse=True)
-def _isolate_logs_and_counter(tmp_path, monkeypatch):
-    """Keep tests out of the real logs, and out of each other's request count."""
-    monkeypatch.setenv("QUERYGUARD_LLM_LOG", str(tmp_path / "llm_calls.jsonl"))
-    monkeypatch.setenv("QUERYGUARD_EXECUTOR_LOG", str(tmp_path / "executions.jsonl"))
+def _isolate_counter():
+    """Keep tests out of each other's request count. Logs are isolated in conftest."""
     reset_request_count()
     yield
     reset_request_count()
@@ -62,24 +73,46 @@ class FakeMessage:
 
 
 class FakeMessages:
-    def __init__(self, parsed) -> None:
-        self._parsed = parsed
+    """Answers each parse() by its output_format, so one fake serves every step.
+
+    A list answers successive calls in order and then repeats its last item --
+    the first GeneratedSQL is the generation, the second the second opinion.
+    """
+
+    def __init__(self, responses: dict) -> None:
+        self._responses = {k: list(v) if isinstance(v, list) else [v] for k, v in responses.items()}
         self.calls: list[dict] = []
 
     def parse(self, **kwargs):
         self.calls.append(kwargs)
-        return FakeMessage(self._parsed)
+        queue = self._responses[kwargs["output_format"]]
+        parsed = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(parsed, Exception):
+            raise parsed
+        return FakeMessage(parsed)
 
 
 class FakeAnthropic:
     """Stand-in for anthropic.Anthropic. Records calls, never uses the network."""
 
-    def __init__(self, parsed) -> None:
-        self.messages = FakeMessages(parsed)
+    def __init__(self, parsed, *, second=None, back_translation=None, judgement=None) -> None:
+        self.messages = FakeMessages(
+            {
+                GeneratedSQL: [parsed, second if second is not None else parsed],
+                BackTranslation: back_translation
+                or BackTranslation(question="How many orders are cancelled?", details=[]),
+                AlignmentJudgement: judgement
+                or AlignmentJudgement(alignment=0.95, discrepancies=[]),
+            }
+        )
 
     @property
     def calls(self):
         return self.messages.calls
+
+    @property
+    def models(self) -> list[str]:
+        return [c["model"] for c in self.calls]
 
 
 def _synthetic_schema() -> DatabaseSchema:
@@ -135,14 +168,21 @@ def _ambiguous_answer() -> GeneratedSQL:
     )
 
 
-def _run(sql_or_answer, **kwargs):
+def _clients(fake: FakeAnthropic) -> dict:
+    return {
+        "client": LLMClient(sdk_client=fake),
+        "validation_client": LLMClient(sdk_client=fake, model=VALIDATION_MODEL),
+    }
+
+
+def _run(sql_or_answer, *, fake_kwargs=None, **kwargs):
     """Drive the pipeline with a fake that returns exactly this answer."""
     parsed = sql_or_answer if isinstance(sql_or_answer, GeneratedSQL) else _answer(sql_or_answer)
-    fake = FakeAnthropic(parsed)
+    fake = FakeAnthropic(parsed, **(fake_kwargs or {}))
     outcome = run_question(
         "how many orders are cancelled?",
-        client=LLMClient(sdk_client=fake),
         schema=_synthetic_schema(),
+        **_clients(fake),
         **kwargs,
     )
     return outcome, fake
@@ -158,7 +198,10 @@ def test_a_question_becomes_rows(live_database) -> None:
     assert outcome.ok, outcome.execution.error_message
     assert outcome.execution.row_count == 1
     assert outcome.execution.rows.iloc[0]["n"] > 0
-    assert len(fake.calls) == 1, "exactly one API call per question"
+    # count(*) is an aggregate, so every validation step runs: the budget is spent.
+    assert fake.models == [
+        "claude-sonnet-5", VALIDATION_MODEL, VALIDATION_MODEL, "claude-sonnet-5"
+    ]
 
 
 def test_a_missing_limit_is_added_on_the_way_through(live_database) -> None:
@@ -181,11 +224,7 @@ def test_an_overflowing_result_is_reported_as_truncated(live_database) -> None:
     15k-row answer came back as a complete-looking 1000 with truncated=False.
     """
     fake = FakeAnthropic(_answer("SELECT * FROM order_items;"))
-    outcome = run_question(
-        "List every order item",
-        client=LLMClient(sdk_client=fake),
-        schema=_synthetic_schema(),
-    )
+    outcome = run_question("List every order item", schema=_synthetic_schema(), **_clients(fake))
 
     assert outcome.ok, outcome.execution.error_message
     assert outcome.sql.endswith(f"LIMIT {DEFAULT_MAX_ROWS + 1}")
@@ -301,13 +340,13 @@ def test_an_executor_refusal_surfaces_through_the_pipeline(live_database) -> Non
 
 
 def test_a_pipeline_run_is_logged_by_both_halves(tmp_path, live_database) -> None:
-    """One LLM line and one execution line, in separate logs."""
+    """Four LLM lines and two execution lines (the second opinion runs too)."""
     _run("SELECT count(*) AS n FROM orders")
 
     llm_log = tmp_path / "llm_calls.jsonl"
     execution_log = tmp_path / "executions.jsonl"
-    assert len(llm_log.read_text().splitlines()) == 1
-    assert len(execution_log.read_text().splitlines()) == 1
+    assert len(llm_log.read_text().splitlines()) == 4
+    assert len(execution_log.read_text().splitlines()) == 2
 
 
 # ------------------------------------------------------------- sanity flags
@@ -343,3 +382,184 @@ def test_sanity_flags_come_from_a_real_execution(live_database) -> None:
     assert outcome.ok, outcome.execution.error_message
     assert outcome.execution.row_count == 0
     assert [f.check for f in outcome.sanity] == [CHECK_EMPTY]
+
+
+# ------------------------------------------------- hallucination and confidence
+
+
+def _executor_returning(frames: dict[str, pd.DataFrame]):
+    """An execute() stand-in keyed by a substring of the SQL. No database."""
+
+    def fake_execute(sql, config=None):
+        for needle, frame in frames.items():
+            if needle in sql:
+                return ExecutionResult(
+                    outcome=OUTCOME_OK, sql_sha256="0" * 64, rows=frame, row_count=len(frame)
+                )
+        raise AssertionError(f"unexpected SQL: {sql}")
+
+    return fake_execute
+
+
+def _patch_execute(monkeypatch, frames) -> None:
+    fake = _executor_returning(frames)
+    monkeypatch.setattr("queryguard.pipeline.execute", fake)
+    monkeypatch.setattr("queryguard.validation.agreement.execute", fake)
+
+
+def _features_log(tmp_path) -> list[dict]:
+    import json
+
+    path = tmp_path / "confidence_features.jsonl"
+    return [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_an_injected_trivial_wrong_answer_is_caught_by_alignment(monkeypatch, tmp_path) -> None:
+    """run_answer skips generation, so a known-wrong query gets the same checks."""
+    wrong = _answer(
+        "SELECT c.customer_id, c.lifetime_value FROM customers AS c "
+        "ORDER BY c.lifetime_value DESC LIMIT 5"
+    )
+    right = _answer(
+        "WITH s AS (SELECT o.customer_id, sum(o.total_amount) AS spent FROM orders AS o "
+        "WHERE o.order_date >= DATE '2025-01-01' AND o.order_date < DATE '2026-01-01' "
+        "GROUP BY o.customer_id) SELECT s.customer_id, s.spent FROM s ORDER BY s.spent DESC LIMIT 5"
+    )
+    _patch_execute(monkeypatch, {
+        "lifetime_value": pd.DataFrame({"customer_id": [301, 77], "lifetime_value": [Decimal("82098.49"), Decimal("80110.00")]}),
+        "WITH s AS": pd.DataFrame({"customer_id": [12, 301], "spent": [Decimal("31002.10"), Decimal("29877.45")]}),
+    })
+    fake = FakeAnthropic(
+        right,
+        back_translation=BackTranslation(question="Which 5 customers have the highest lifetime value?", details=[]),
+        judgement=AlignmentJudgement(alignment=0.25, discrepancies=["original asks for 2025 spend; query uses lifetime_value"]),
+    )
+
+    outcome = run_answer(
+        "Which 5 customers spent the most in 2025?", wrong, schema=_synthetic_schema(), **_clients(fake)
+    )
+
+    # The wrong query has no join, aggregate, CTE or subquery, so it is trivial
+    # by definition and gets no second opinion: alignment alone has to catch it.
+    assert outcome.agreement is None
+    assert outcome.alignment == 0.25
+    assert outcome.discrepancies == ("original asks for 2025 spend; query uses lifetime_value",)
+    assert outcome.back_translation == "Which 5 customers have the highest lifetime value?"
+    assert outcome.confidence < 0.3
+    assert outcome.call is None, "no generation call was made"
+    assert len(fake.calls) == 2, "trivial SQL: back-translate and judge only"
+
+
+def test_a_non_trivial_wrong_answer_also_meets_disagreement(monkeypatch) -> None:
+    """Miscased status: count(*) is an aggregate, so the second opinion runs."""
+    wrong = _answer("SELECT count(*) AS n FROM orders AS o WHERE o.status = 'Cancelled'")
+    right = _answer("SELECT count(o.order_id) FROM orders AS o WHERE o.status = 'cancelled'")
+    _patch_execute(monkeypatch, {
+        "'Cancelled'": pd.DataFrame({"n": pd.Series([0], dtype="int64")}),
+        "'cancelled'": pd.DataFrame({"count": pd.Series([812], dtype="int64")}),
+    })
+    # run_answer makes no generation call, so the only GeneratedSQL the fake
+    # hands out is the second opinion.
+    fake = FakeAnthropic(right)
+
+    outcome = run_answer("How many orders were cancelled?", wrong, schema=_synthetic_schema(), **_clients(fake))
+
+    assert outcome.agreement.outcome == "disagree"
+    assert "0 vs 812" in outcome.agreement.explanation
+    assert outcome.features.agreement == "disagree"
+    assert outcome.confidence < 0.5
+    assert len(outcome.validation_calls) == 3
+
+
+def test_a_clean_run_scores_high_and_uses_exactly_the_budget(monkeypatch) -> None:
+    sql = "SELECT count(*) AS n FROM orders AS o WHERE o.status = 'cancelled'"
+    _patch_execute(monkeypatch, {"count": pd.DataFrame({"n": pd.Series([812], dtype="int64")})})
+    outcome, fake = _run(sql)
+
+    assert outcome.agreement.outcome == "agree"
+    assert outcome.alignment == 0.95
+    assert outcome.confidence > 0.85
+    assert len(fake.calls) == MAX_CALLS_PER_QUESTION
+    assert outcome.cost_usd == pytest.approx(outcome.call.cost_usd + sum(c.cost_usd for c in outcome.validation_calls))
+
+
+def test_a_trivial_query_gets_no_second_opinion(monkeypatch) -> None:
+    _patch_execute(monkeypatch, {"email": pd.DataFrame({"email": ["a@b.c"]})})
+    outcome, fake = _run("SELECT c.email FROM customers AS c WHERE c.customer_id = 42")
+    assert outcome.agreement is None
+    assert outcome.features.agreement == "not_run"
+    assert len(fake.calls) == 3
+
+
+def test_validation_can_be_switched_off(monkeypatch, tmp_path) -> None:
+    _patch_execute(monkeypatch, {"count": pd.DataFrame({"n": pd.Series([812], dtype="int64")})})
+    outcome, fake = _run("SELECT count(*) AS n FROM orders", validate=False)
+    assert len(fake.calls) == 1
+    assert outcome.alignment is None and outcome.agreement is None
+    assert outcome.features.alignment is None
+    assert len(_features_log(tmp_path)) == 1, "an unvalidated run is still a training row"
+
+
+def test_a_blocked_query_scores_zero_spends_nothing_more_and_is_logged(tmp_path) -> None:
+    outcome, fake = _run("SELECT order_id FROM orders LIMIT 999999")
+    assert outcome.confidence == 0.0
+    assert outcome.confidence_breakdown == {}
+    assert not outcome.features.executed
+    assert len(fake.calls) == 1
+    [row] = _features_log(tmp_path)
+    assert row["confidence"] == 0.0 and row["features"]["executed"] is False
+
+
+def test_a_failed_query_is_not_validated(monkeypatch) -> None:
+    failed = ExecutionResult(outcome=OUTCOME_FAILED, sql_sha256="0" * 64, sqlstate="42P01")
+    monkeypatch.setattr("queryguard.pipeline.execute", lambda *a, **k: failed)
+    outcome, fake = _run("SELECT count(*) FROM nope")
+    assert len(fake.calls) == 1
+    assert outcome.confidence == 0.0
+
+
+def test_a_failing_validation_call_costs_its_signal_not_the_answer(monkeypatch) -> None:
+    _patch_execute(monkeypatch, {"count": pd.DataFrame({"n": pd.Series([812], dtype="int64")})})
+    outcome, _ = _run(
+        "SELECT count(*) AS n FROM orders",
+        fake_kwargs={"back_translation": ValueError("malformed structured output")},
+    )
+    assert outcome.ok
+    assert outcome.alignment is None
+    assert outcome.validation_errors == ("alignment: ValueError: malformed structured output",)
+    assert outcome.agreement.outcome == "agree", "the other step still ran"
+    assert outcome.features.alignment is None
+
+
+def test_the_per_question_budget_refuses_the_call_past_its_limit() -> None:
+    budget = QuestionBudget(limit=2)
+    budget.spend("generate")
+    budget.spend("back_translate")
+    with pytest.raises(QuestionBudgetExceeded, match="refused judge"):
+        budget.spend("judge")
+
+
+def test_the_pipeline_enforces_the_budget_before_calling(monkeypatch) -> None:
+    """With one call left, the judge and second opinion are refused, not made."""
+    _patch_execute(monkeypatch, {"count": pd.DataFrame({"n": pd.Series([812], dtype="int64")})})
+    fake = FakeAnthropic(_answer("SELECT count(*) AS n FROM orders"))
+    budget = QuestionBudget(limit=1)
+
+    outcome = run_answer(
+        "how many orders?", _answer("SELECT count(*) AS n FROM orders"),
+        schema=_synthetic_schema(), budget=budget, **_clients(fake),
+    )
+
+    assert budget.spent == ["back_translate"]
+    assert len(fake.calls) == 1, "nothing past the budget reached the client"
+    assert outcome.alignment is None and outcome.agreement is None
+    assert [e.split(":")[0] for e in outcome.validation_errors] == ["alignment", "agreement"]
+
+
+def test_the_budget_is_separate_from_the_global_cap(monkeypatch) -> None:
+    """The process cap still applies inside a question's budget."""
+    monkeypatch.setenv("QUERYGUARD_MAX_REQUESTS", "2")
+    _patch_execute(monkeypatch, {"count": pd.DataFrame({"n": pd.Series([812], dtype="int64")})})
+    outcome, fake = _run("SELECT count(*) AS n FROM orders")
+    assert len(fake.calls) == 2
+    assert any("RequestCapExceeded" in e for e in outcome.validation_errors)
