@@ -27,3 +27,6 @@ schema_cache.json
 
 # LLM call logs — may contain question text and cost data.
 logs/
+
+# Eval dry runs: fake-client output, never calibration data.
+evals/results/dryrun*
