@@ -414,7 +414,7 @@ def _features_log(tmp_path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines()]
 
 
-def test_an_injected_trivial_wrong_answer_is_caught_by_alignment(monkeypatch, tmp_path) -> None:
+def test_an_injected_top_n_wrong_answer_is_caught_by_both_detectors(monkeypatch, tmp_path) -> None:
     """run_answer skips generation, so a known-wrong query gets the same checks."""
     wrong = _answer(
         "SELECT c.customer_id, c.lifetime_value FROM customers AS c "
@@ -439,15 +439,15 @@ def test_an_injected_trivial_wrong_answer_is_caught_by_alignment(monkeypatch, tm
         "Which 5 customers spent the most in 2025?", wrong, schema=_synthetic_schema(), **_clients(fake)
     )
 
-    # The wrong query has no join, aggregate, CTE or subquery, so it is trivial
-    # by definition and gets no second opinion: alignment alone has to catch it.
-    assert outcome.agreement is None
+    # No join, aggregate, CTE or subquery -- but ORDER BY ... LIMIT makes it a
+    # top-N, so it gets a second opinion, and the rankings differ.
+    assert outcome.agreement.outcome == "disagree"
     assert outcome.alignment == 0.25
     assert outcome.discrepancies == ("original asks for 2025 spend; query uses lifetime_value",)
     assert outcome.back_translation == "Which 5 customers have the highest lifetime value?"
     assert outcome.confidence < 0.3
     assert outcome.call is None, "no generation call was made"
-    assert len(fake.calls) == 2, "trivial SQL: back-translate and judge only"
+    assert len(fake.calls) == 3, "back-translate, judge, second query"
 
 
 def test_a_non_trivial_wrong_answer_also_meets_disagreement(monkeypatch) -> None:

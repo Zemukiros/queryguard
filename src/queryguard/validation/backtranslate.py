@@ -61,8 +61,8 @@ question a user asked, and a BACK-TRANSLATED question describing what a SQL
 query actually computes. Decide whether answering the second answers the first.
 
 Score `alignment` from 0 to 1:
-- 1.0: same meaning. Wording, extra identifying columns, or a presentation
-  detail (column order, sorting when no order was asked for) may differ.
+- 1.0: same meaning. Wording, extra columns, column names, and sorting the
+  original did not ask about may all differ.
 - 0.7-0.9: same question with a minor difference that rarely changes the answer.
 - 0.4-0.6: one material difference -- a different time window, a missing or
   extra filter, a different metric definition.
@@ -73,7 +73,13 @@ what the original asks for and what the query does instead, e.g. "original
 asks for net revenue; the query computes gross revenue". Leave it empty when
 the questions match. Do not invent differences: a reasonable reading of an
 underspecified original (e.g. treating "orders" as all orders) is not one.
-A row cap such as LIMIT 1000 or 1001 added for safety is never a discrepancy."""
+
+These are NOT discrepancies -- do not list them and do not lower the score:
+- extra columns the original did not ask for (a count beside an average, a
+  name beside an id);
+- column names or aliases;
+- a sort order the original did not ask about;
+- a row cap such as LIMIT 1000 or 1001 added for safety."""
 
 
 class BackTranslation(BaseModel):
@@ -96,6 +102,7 @@ class AlignmentJudgement(BaseModel):
 
 def build_backtranslation_blocks(schema: DatabaseSchema) -> list[dict[str, Any]]:
     """Schema then instructions; one breakpoint, on the last block."""
+    # Below Haiku 4.5's 4,096-token cache floor by design ("SQL plus schema only"), so this never caches.
     return [
         {"type": "text", "text": "Database schema:\n\n" + schema.render_for_prompt()},
         {

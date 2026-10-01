@@ -129,7 +129,53 @@ def test_a_single_row_of_null_aggregates_is_an_empty_result(schema) -> None:
     )
     [flag] = _only(flags, CHECK_EMPTY)
     assert flag.severity == WARN
-    assert "NULL aggregates" in flag.explanation
+    assert "empty aggregates" in flag.explanation
+
+
+def test_a_count_of_zero_is_an_empty_result_with_the_case_hint(schema) -> None:
+    """The live run's injection (d): count(*) = 0 is one row, but it matched nothing."""
+    frame = pd.DataFrame({"cancelled_orders": pd.Series([0], dtype="int64")})
+    flags = _flags(
+        schema, frame,
+        "SELECT count(*) AS cancelled_orders FROM orders AS o WHERE o.status = 'Cancelled'",
+        "How many orders were cancelled?",
+    )
+    [flag] = _only(flags, CHECK_EMPTY)
+    assert flag.severity == WARN
+    assert "'Cancelled' is not a stored value of orders.status" in flag.explanation
+
+
+def test_a_coalesced_sum_of_zero_is_an_empty_result(schema) -> None:
+    frame = pd.DataFrame({"revenue": [Decimal("0.00")]})
+    sql = (
+        "SELECT coalesce(sum(o.total_amount), 0) AS revenue FROM orders AS o "
+        "WHERE o.order_date >= DATE '2031-01-01'"
+    )
+    [flag] = _only(_flags(schema, frame, sql, "What was revenue in 2031?"), CHECK_EMPTY)
+    assert "2031-01-01 is after the latest date" in flag.explanation
+
+
+def test_a_zero_count_for_a_yes_no_question_is_only_info(schema) -> None:
+    frame = pd.DataFrame({"n": pd.Series([0], dtype="int64")})
+    sql = "SELECT count(*) AS n FROM refunds AS r WHERE r.amount > 50000"
+    [flag] = _only(_flags(schema, frame, sql, "Were there any refunds over $50,000?"), CHECK_EMPTY)
+    assert flag.severity == INFO
+
+
+def test_a_nonzero_count_is_not_empty(schema) -> None:
+    frame = pd.DataFrame({"n": pd.Series([178], dtype="int64")})
+    sql = "SELECT count(*) AS n FROM orders AS o WHERE o.status = 'cancelled'"
+    assert _only(_flags(schema, frame, sql, "How many orders were cancelled?"), CHECK_EMPTY) == []
+
+
+def test_a_zero_count_beside_a_real_value_is_not_empty(schema) -> None:
+    """Only a row whose every aggregate is empty matched nothing."""
+    frame = pd.DataFrame({"refunds": pd.Series([0], dtype="int64"), "orders": pd.Series([5000], dtype="int64")})
+    sql = (
+        "SELECT count(r.refund_id) AS refunds, count(*) AS orders FROM orders AS o "
+        "LEFT JOIN refunds AS r ON r.order_id = o.order_id AND r.amount > 50000"
+    )
+    assert _only(_flags(schema, frame, sql), CHECK_EMPTY) == []
 
 
 def test_a_failed_execution_has_nothing_to_check(schema) -> None:
@@ -157,6 +203,42 @@ def test_nulls_in_a_not_null_column_point_at_the_join(schema) -> None:
     assert flag.column == "total_amount"
     assert "70% NULL" in flag.explanation
     assert "NOT NULL" in flag.explanation
+
+
+_TOP_BY_LIFETIME_VALUE = (
+    "SELECT c.customer_id, c.lifetime_value AS total_spent FROM customers AS c "
+    "ORDER BY c.lifetime_value DESC LIMIT 5"
+)
+
+
+def _top_five_nulls() -> pd.DataFrame:
+    return pd.DataFrame({
+        "customer_id": pd.Series([5, 481, 482, 483, 484], dtype="int64"),
+        "total_spent": [None] * 5,
+    })
+
+
+def test_nulls_from_a_desc_sort_are_explained_as_nulls_first(schema) -> None:
+    """The live run's injection (c): DESC put the NULL lifetime values on top."""
+    assert _profile(schema, "customers", "lifetime_value").nullable
+    [flag] = _only(_flags(schema, _top_five_nulls(), _TOP_BY_LIFETIME_VALUE), CHECK_NULL_HEAVY)
+    assert flag.severity == WARN
+    assert "Postgres sorts NULLs first in DESC" in flag.explanation
+    assert "NULLS LAST" in flag.explanation
+    assert "outer join" not in flag.explanation
+
+
+def test_desc_with_nulls_last_is_not_blamed_on_the_sort(schema) -> None:
+    sql = _TOP_BY_LIFETIME_VALUE.replace("DESC", "DESC NULLS LAST")
+    [flag] = _only(_flags(schema, _top_five_nulls(), sql), CHECK_NULL_HEAVY)
+    assert "NULLs first" not in flag.explanation
+    assert "outer join" in flag.explanation
+
+
+def test_an_ascending_sort_is_not_blamed_for_nulls(schema) -> None:
+    sql = _TOP_BY_LIFETIME_VALUE.replace(" DESC", "")
+    [flag] = _only(_flags(schema, _top_five_nulls(), sql), CHECK_NULL_HEAVY)
+    assert "NULLs first" not in flag.explanation
 
 
 def test_a_column_that_is_mostly_null_in_the_table_is_only_info(schema) -> None:

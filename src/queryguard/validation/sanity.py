@@ -7,8 +7,11 @@ runs cleanly and returns a plausible-looking table built on a bad JOIN or a
 filter that matched nothing. These checks look at the rows the way a reviewer
 would and flag shapes that are rarely correct:
 
-- empty_result          nothing came back for a question that asks for data
-- null_heavy_column     more than half NULL, usually an outer join that missed
+- empty_result          nothing came back for a question that asks for data --
+                        including one row of count = 0 or NULL/zero sums, which
+                        is how an aggregate reports that it matched nothing
+- null_heavy_column     more than half NULL: usually an outer join that missed,
+                        or a DESC sort putting NULLs first (Postgres's default)
 - constant_column       one value in every row of more than five -- the Phase 0
                         seed bug looked exactly like this, a volatile expression
                         evaluated once and copied into every row
@@ -448,20 +451,38 @@ def _filter_hints(ctx: _Context) -> list[str]:
     return hints
 
 
+def _matched_nothing(ctx: _Context) -> bool:
+    """Whether a one-row result is an aggregate over zero rows.
+
+    sum() and avg() of nothing are NULL, and count() of nothing is 0, so an
+    empty match still comes back as one row. A coalesced sum of 0 is treated
+    the same way. `WHERE status = 'Cancelled'` returns count = 0, not zero
+    rows, and without this it was never seen as empty.
+    """
+    aggregates = [c for c in ctx.columns if c.output.aggregate is not None]
+    if not aggregates:
+        # Unparsed select list: a row of nothing but NULLs is still empty.
+        return bool(ctx.columns) and all(c.values.isna().all() for c in ctx.columns)
+
+    def empty(col: _Column) -> bool:
+        if col.values.isna().all():
+            return True
+        if col.output.aggregate in {"count", "sum"}:
+            numbers = _as_numeric(col.values)
+            return numbers is not None and bool((numbers.fillna(0) == 0).all())
+        return False
+
+    return all(empty(c) for c in aggregates)
+
+
 def _check_empty(ctx: _Context) -> list[SanityFlag]:
     frame = ctx.frame
     if len(frame) == 0:
         what = "The query matched no rows"
+    elif len(frame) == 1 and _matched_nothing(ctx):
+        what = "The query returned a single row of empty aggregates (zero or NULL), so it matched no rows"
     else:
-        # An aggregate over zero rows is still one row: sum() and avg() of
-        # nothing are NULL. That is an empty result wearing a disguise.
-        nullable_aggs = [
-            c for c in ctx.columns if c.output.aggregate in {"sum", "avg", "min", "max"}
-        ]
-        watched = nullable_aggs or ctx.columns
-        if len(frame) != 1 or not watched or not all(c.values.isna().all() for c in watched):
-            return []
-        what = "The query returned a single row of NULL aggregates, so it matched no rows"
+        return []
 
     hints = _filter_hints(ctx)
     hint_text = f" Possible cause: {'; '.join(hints)}." if hints else ""
@@ -480,6 +501,31 @@ def _check_empty(ctx: _Context) -> list[SanityFlag]:
     )]
 
 
+def _nulls_first_by_desc(ctx: _Context, col: _Column) -> bool:
+    """The result leads with NULLs because the outer ORDER BY sorts this column DESC.
+
+    PostgreSQL's default for DESC is NULLS FIRST, so `ORDER BY lifetime_value
+    DESC LIMIT 5` returns the NULL rows before any real value.
+    """
+    if col.source is not None and not col.source.nullable:
+        return False
+    if not pd.isna(col.values.iloc[0]):
+        return False  # NULLS FIRST would put a NULL in the first row
+    unquoted = re.sub(r"'(?:[^']|'')*'", "''", ctx.sql)
+    clauses = re.findall(r"\bORDER\s+BY\b(.*?)(?=\bLIMIT\b|\bOFFSET\b|\bFETCH\b|\)|$)", unquoted, re.IGNORECASE | re.DOTALL)
+    if not clauses:
+        return False
+    names = {col.name} | ({col.source.name} if col.source else set())
+    return any(
+        re.search(
+            rf"(?:\b\w+\.)?\b{re.escape(name)}\s+DESC\b(?!\s+NULLS\s+LAST)",
+            clauses[-1],
+            re.IGNORECASE,
+        )
+        for name in names
+    )
+
+
 def _check_null_heavy(ctx: _Context) -> list[SanityFlag]:
     flags: list[SanityFlag] = []
     for col in ctx.columns:
@@ -491,6 +537,16 @@ def _check_null_heavy(ctx: _Context) -> list[SanityFlag]:
         observed = f"{col.name} is {fraction:.0%} NULL ({int(col.values.isna().sum())} of {len(col.values)} rows)"
 
         source = col.source
+        if _nulls_first_by_desc(ctx, col):
+            # Not a join problem: the top-N picked the NULLs, because they sort first.
+            flags.append(SanityFlag(
+                CHECK_NULL_HEAVY, WARN,
+                f"{observed}; the query sorts {col.label} DESC and Postgres sorts NULLs "
+                f"first in DESC, so the NULL rows fill the top of the result -- consider "
+                f"NULLS LAST.",
+                col.name,
+            ))
+            continue
         if source is not None and col.output.aggregate is None and source.null_fraction is not None:
             if source.null_fraction > NULL_HEAVY_FRACTION:
                 flags.append(SanityFlag(

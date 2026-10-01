@@ -7,7 +7,10 @@ right; if it does not, at least one is wrong -- and the diff says where to look.
 Only non-trivial queries get a second opinion. `SELECT email FROM customers
 WHERE customer_id = 42` has nowhere to hide a mistake that a rewrite would
 catch, and the second call costs a Sonnet generation. Anything with a join, an
-aggregate, a CTE or a subquery qualifies.
+aggregate, a CTE or a subquery qualifies, and so does a top-N (`ORDER BY ...
+LIMIT`): the first live run ranked customers by `lifetime_value` for a question
+about 2025 spend, a single-table query with no join or aggregate in sight, and
+ranking by the wrong column is exactly the mistake a rewrite exposes.
 
 Comparison rules, in the order they apply:
 
@@ -116,6 +119,8 @@ def is_non_trivial(sql: str) -> bool:
     keywords = {t.normalized for t in statement.flatten() if t.ttype in T.Keyword}
     if any("JOIN" in k for k in keywords) or "GROUP BY" in keywords:
         return True
+    if "ORDER BY" in keywords and "LIMIT" in keywords:
+        return True  # a top-N: which rows make the cut depends on what is ranked
     if any(t.ttype is T.Keyword.CTE for t in statement.flatten()):
         return True
     return _has_aggregate(statement) or _has_subquery(statement)

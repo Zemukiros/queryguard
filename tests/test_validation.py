@@ -183,6 +183,23 @@ def test_the_judge_sees_both_questions_and_no_schema() -> None:
     assert len(judgement.discrepancies) == 1
 
 
+def test_the_judge_is_told_what_is_not_a_discrepancy() -> None:
+    """Live run (e): a correct answer lost 1.5 logits to an extra column and a sort."""
+    fake = _Fake(AlignmentJudgement(alignment=1.0, discrepancies=[]))
+    judge_alignment(
+        "What was the average order value by country?",
+        BackTranslation(question="Average order value and order count by country, sorted descending", details=[]),
+        client=LLMClient(sdk_client=fake, model=VALIDATION_MODEL),
+    )
+    system = " ".join(block["text"] for block in fake.messages.calls[0]["system"])
+    flat = " ".join(system.split())
+    assert "These are NOT discrepancies" in flat
+    assert "extra columns the original did not ask for" in flat
+    assert "column names or aliases" in flat
+    assert "a sort order the original did not ask about" in flat
+    assert "row cap" in flat
+
+
 def test_alignment_is_bounded_zero_to_one() -> None:
     with pytest.raises(ValueError):
         AlignmentJudgement(alignment=1.5, discrepancies=[])
@@ -200,9 +217,11 @@ def test_alignment_is_bounded_zero_to_one() -> None:
         "WITH t AS (SELECT 1 AS x) SELECT x FROM t",
         "SELECT o.order_id FROM orders AS o WHERE o.customer_id IN (SELECT c.customer_id FROM customers AS c)",
         "SELECT o.status FROM orders AS o GROUP BY o.status",
+        "SELECT o.order_id FROM orders AS o ORDER BY o.order_date DESC LIMIT 5",
+        "SELECT c.customer_id FROM customers AS c ORDER BY c.lifetime_value DESC LIMIT 5",
     ],
 )
-def test_joins_aggregates_ctes_and_subqueries_are_non_trivial(sql) -> None:
+def test_joins_aggregates_ctes_subqueries_and_top_n_are_non_trivial(sql) -> None:
     assert is_non_trivial(sql)
 
 
@@ -210,8 +229,11 @@ def test_joins_aggregates_ctes_and_subqueries_are_non_trivial(sql) -> None:
     "sql",
     [
         "SELECT c.customer_id, c.email FROM customers AS c WHERE c.customer_id = 42",
-        "SELECT o.order_id FROM orders AS o ORDER BY o.order_date DESC LIMIT 5",
         "SELECT round(p.price, 2) AS price FROM products AS p",
+        # Sorted but not cut: every row comes back whatever the ranking.
+        "SELECT o.order_id FROM orders AS o ORDER BY o.order_date DESC",
+        # Cut but not ranked: an arbitrary sample, nothing a rewrite could check.
+        "SELECT o.order_id FROM orders AS o LIMIT 5",
     ],
 )
 def test_a_plain_lookup_is_trivial(sql) -> None:
