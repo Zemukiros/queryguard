@@ -30,3 +30,6 @@ logs/
 
 # Eval dry runs: fake-client output, never calibration data.
 evals/results/dryrun*
+
+# Private Claude Code notes
+CLAUDE.local.md
