@@ -1,4 +1,4 @@
-"""Query history, feedback and the response cache, in SQLite.
+"""Query history, feedback and the response cache, in SQLite (LocalState's backend).
 
 Not in Postgres on purpose: the API reaches Postgres only as `queryguard_ro`,
 whose inability to write is the project's first boundary. Giving the API a
@@ -24,11 +24,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from queryguard.config import REPO_ROOT
-
-FEEDBACK_CANDIDATES = REPO_ROOT / "evals" / "feedback_candidates.yaml"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -148,38 +143,6 @@ class Store:
                    WHERE f.correct = 0 ORDER BY f.created_at"""
             ).fetchall()
         return [dict(r) for r in rows]
-
-    def export_feedback_candidates(self, path: Path = FEEDBACK_CANDIDATES) -> tuple[Path, int]:
-        """Write answers marked incorrect as golden-set candidates. Returns (path, count).
-
-        Each candidate carries what the pipeline did and blank golden fields:
-        a person writes the golden SQL and category, then moves the entry into
-        golden.yaml. Nothing here is a golden case until that review.
-        """
-        candidates = []
-        for row in self.incorrect_feedback():
-            result = json.loads(row["result_json"])
-            candidates.append({
-                "query_id": row["query_id"],
-                "asked_at": row["created_at"],
-                "question": row["question"],
-                "outcome": row["outcome"],
-                "confidence": row["confidence"],
-                "sql": result.get("sql"),
-                "executed_sql": result.get("executed_sql"),
-                "feedback_note": row["note"],
-                "feedback_at": row["feedback_at"],
-                "category": None,
-                "golden_sql": None,
-            })
-        path.parent.mkdir(parents=True, exist_ok=True)
-        header = (
-            "# Answers users marked incorrect, exported from the API's feedback store.\n"
-            "# Review each: write golden_sql and category, then move it into golden.yaml.\n"
-        )
-        body = yaml.safe_dump({"candidates": candidates}, sort_keys=False, allow_unicode=True, width=100)
-        path.write_text(header + body, encoding="utf-8")
-        return path, len(candidates)
 
     # ------------------------------------------------------------------ cache
 

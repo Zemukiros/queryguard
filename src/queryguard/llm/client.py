@@ -11,6 +11,12 @@ Three things this owns that the SDK does not:
    understates a cache-miss call and overstates every cache hit after it.
 3. A durable JSONL log, so `running_total_usd()` survives process restarts.
 
+The cap and the log sit behind `CallGuard`. The default guard is the process cap
+and the JSONL file, which is what the CLI, the evals and tests use. The API
+passes its own guard (queryguard.state): a daily call cap and a spend ledger
+shared by every instance, because a per-process counter means nothing when a
+serverless platform runs twenty processes and recycles them at will.
+
 Model IDs and prices below are the current published values and are complete as
 written -- do NOT append a date suffix to a model ID; that produces a 404.
 """
@@ -98,6 +104,33 @@ def max_requests() -> int:
 def log_path() -> Path:
     override = os.getenv("QUERYGUARD_LLM_LOG")
     return Path(override) if override else REPO_ROOT / "logs" / "llm_calls.jsonl"
+
+
+class CallGuard:
+    """Admits each API call before it is made and records it afterwards.
+
+    This default is the process-wide request cap plus the JSONL log.
+    """
+
+    def before_call(self) -> None:
+        """Raise RequestCapExceeded to refuse the call. Runs before any network I/O."""
+        global _request_count
+        cap = max_requests()
+        if _request_count >= cap:
+            # Raise before incrementing and before any network call, so the cap
+            # is a real ceiling on API requests rather than on attempts.
+            raise RequestCapExceeded(
+                f"request cap of {cap} reached ({_request_count} made); "
+                "raise QUERYGUARD_MAX_REQUESTS if this is intentional"
+            )
+        _request_count += 1
+
+    def after_call(self, entry: dict[str, Any], log: Path | None = None) -> None:
+        """Record a made call: its cost (estimated_cost_usd) and log fields."""
+        append_log(entry, log)
+
+
+PROCESS_GUARD = CallGuard()
 
 
 # ------------------------------------------------------------------- costing
@@ -255,8 +288,9 @@ class CallResult:
 class LLMClient:
     """Anthropic SDK wrapper. Pass `sdk_client` to inject a fake in tests."""
 
-    def __init__(self, sdk_client: Any = None, model: str = DEFAULT_MODEL) -> None:
+    def __init__(self, sdk_client: Any = None, model: str = DEFAULT_MODEL, guard: CallGuard | None = None) -> None:
         self.model = model
+        self.guard = guard or PROCESS_GUARD
         if sdk_client is not None:
             self._client = sdk_client
         else:
@@ -280,18 +314,8 @@ class LLMClient:
         output_config: dict[str, Any] | None = None,
         log: Path | None = None,
     ) -> CallResult:
-        """One structured-output call, capped, costed and logged."""
-        global _request_count
-
-        cap = max_requests()
-        if _request_count >= cap:
-            # Raise before incrementing and before any network call, so the cap
-            # is a real ceiling on API requests rather than on attempts.
-            raise RequestCapExceeded(
-                f"request cap of {cap} reached ({_request_count} made); "
-                "raise QUERYGUARD_MAX_REQUESTS if this is intentional"
-            )
-        _request_count += 1
+        """One structured-output call, capped, costed and logged (see CallGuard)."""
+        self.guard.before_call()
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -315,7 +339,7 @@ class LLMClient:
             # every cost total built on this log undercounts. The first eval
             # run lost four calls this way.
             if _was_answered(exc):
-                append_log(
+                self.guard.after_call(
                     {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "model": self.model,
@@ -336,7 +360,7 @@ class LLMClient:
         _warn_if_cache_was_ignored(self.model, system_blocks, usage)
         cost = estimate_cost_usd(self.model, usage)
 
-        append_log(
+        self.guard.after_call(
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "model": self.model,

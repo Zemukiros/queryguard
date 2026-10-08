@@ -21,7 +21,8 @@ limit (429 + Retry-After), then the daily spend ceiling (503 + Retry-After).
 See settings.py for every limit. A streamed cache hit is a single `done` event.
 
 The database boundary is unchanged: generated SQL still runs only as
-`queryguard_ro` through the executor. The app's own state is SQLite (store.py).
+`queryguard_ro` through the executor. The app's own state (limits, spend,
+cache, history) sits behind queryguard.state.AppState.
 
 Exception text from a stage is logged, not returned: a database or SDK error
 message can carry hostnames and request details that do not belong in a public
@@ -45,9 +46,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from queryguard.api.limits import RateLimiter, SpendCeiling, seconds_until_utc_midnight, spent_today_usd
+from queryguard.api.limits import seconds_until_utc_midnight
 from queryguard.api.settings import Settings
-from queryguard.api.store import Store
 from queryguard.events import ErrorPayload, Out, QueryResult, StageEvent
 from queryguard.config import REPO_ROOT
 from queryguard.llm.fake import DemoFakeSDK
@@ -56,6 +56,7 @@ from queryguard.generate import Ambiguity, GeneratedSQL
 from queryguard.pipeline import QuestionBudgetExceeded, stream_answer, stream_question
 from queryguard.text import normalize_question, normalize_sql
 from queryguard.schema.introspect import DatabaseSchema, TableInfo, load_schema
+from queryguard.state import AppState, Reservation, make_state
 from queryguard.validation.backtranslate import VALIDATION_MODEL
 from queryguard.validation.confidence import SCORER_VERSION
 
@@ -261,9 +262,7 @@ class _State:
     def __init__(self, settings: Settings, schema: DatabaseSchema | None,
                  client: LLMClient | None, validation_client: LLMClient | None) -> None:
         self.settings = settings
-        self.store = Store(settings.db_path)
-        self.limiter = RateLimiter(settings.rate_per_minute, settings.rate_per_day)
-        self.ceiling = SpendCeiling(settings.daily_spend_usd, settings.question_reserve_usd)
+        self.store: AppState = make_state(settings)
         self._schema = schema
         self._client = client
         self._validation_client = validation_client
@@ -321,8 +320,12 @@ def create_app(
         return request.client.host if request.client else "unknown"
 
     async def admit(question: str, sql: str | None, request: Request,
-                    source: str = "user") -> tuple[str, str, QueryResult | None]:
-        """(client key, cache key, cached result or None). Raises 429/503 before any API call."""
+                    source: str = "user") -> tuple[str, str, QueryResult | None, Reservation | None]:
+        """(client key, cache key, cached result, reservation). Raises 429/503 before any API call.
+
+        A cached result comes back with no reservation; otherwise the caller
+        holds one and must hand it to run(), which releases it.
+        """
         client = state.store.client_key(client_ip(request))
         key = cache_key(question, await state.schema(), sql)
 
@@ -334,17 +337,17 @@ def create_app(
                         **({"sql_source": source} if sql is not None else {})}
             )
             await asyncio.to_thread(record, result, client)
-            return client, key, result
+            return client, key, result, None
 
-        retry_after = state.limiter.hit(client)
+        retry_after = await asyncio.to_thread(state.store.rate_hit, client)
         if retry_after is not None:
             raise HTTPException(
                 429,
                 detail=f"rate limit: {settings.rate_per_minute}/minute and {settings.rate_per_day}/day per client",
                 headers={"Retry-After": str(max(1, int(retry_after + 0.999)))},
             )
-        admitted, spent = await asyncio.to_thread(state.ceiling.try_admit)
-        if not admitted:
+        reservation, spent = await asyncio.to_thread(state.store.try_reserve)
+        if reservation is None:
             raise HTTPException(
                 503,
                 detail=(
@@ -353,7 +356,7 @@ def create_app(
                 ),
                 headers={"Retry-After": str(seconds_until_utc_midnight())},
             )
-        return client, key, None
+        return client, key, None, reservation
 
     def record(result: QueryResult, client: str) -> None:
         state.store.record(
@@ -363,8 +366,8 @@ def create_app(
         )
 
     async def run(question: str, sql: str | None, client: str, key: str, query_id: str,
-                  source: str = "user") -> AsyncIterator[StageEvent]:
-        """The pipeline's events, recorded and cached on the way out. Releases the spend reserve.
+                  reservation: Reservation, source: str = "user") -> AsyncIterator[StageEvent]:
+        """The pipeline's events, recorded and cached on the way out. Releases the reservation.
 
         sql None: generate (stream_question). Otherwise run that SQL (stream_answer),
         which is the same guardrail, executor and validators from `guardrails` on.
@@ -407,14 +410,15 @@ def create_app(
                     event = public
                 yield event
         finally:
-            state.ceiling.release()
+            await asyncio.to_thread(state.store.release, reservation)
 
     async def answer_json(question: str, sql: str | None, request: Request, source: str = "user") -> Any:
-        client, key, cached = await admit(question, sql, request, source)
+        client, key, cached, reservation = await admit(question, sql, request, source)
         if cached is not None:
             return cached
+        assert reservation is not None
         query_id = uuid.uuid4().hex
-        async for event in run(question, sql, client, key, query_id, source):
+        async for event in run(question, sql, client, key, query_id, reservation, source):
             if event.stage == "done":
                 return event.payload
             if event.stage == "error":
@@ -425,13 +429,14 @@ def create_app(
         raise HTTPException(500, detail="pipeline ended without a result")
 
     async def answer_stream(question: str, sql: str | None, request: Request, source: str = "user") -> StreamingResponse:
-        client, key, cached = await admit(question, sql, request, source)
+        client, key, cached, reservation = await admit(question, sql, request, source)
 
         async def events() -> AsyncIterator[str]:
             if cached is not None:
                 yield sse(StageEvent(elapsed_ms=0, duration_ms=0, payload=cached))
                 return
-            async for event in run(question, sql, client, key, uuid.uuid4().hex, source):
+            assert reservation is not None
+            async for event in run(question, sql, client, key, uuid.uuid4().hex, reservation, source):
                 yield sse(event)
 
         return StreamingResponse(
@@ -509,7 +514,7 @@ def create_app(
 
     @app.get("/healthz", response_model=Health)
     async def healthz() -> Health:
-        spent = await asyncio.to_thread(spent_today_usd)
+        spent = await asyncio.to_thread(state.store.spent_today)
         return Health(
             status="ok", version=API_VERSION, scorer_version=SCORER_VERSION, fake_llm=settings.fake_llm,
             budget=Budget(spent_today_usd=round(spent, 6), daily_ceiling_usd=settings.daily_spend_usd),
