@@ -50,6 +50,29 @@ from pathlib import Path
 from queryguard.config import REPO_ROOT, load_env, on_vercel
 
 
+_REDIS_SCHEMES = ("redis://", "rediss://", "unix://")
+
+
+def _redis_url(name: str = "QUERYGUARD_REDIS_URL") -> str | None:
+    """The Redis URL, checked here so a bad one fails at startup with a message
+    that names the variable. Its value is never included: it holds a password.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().strip("'\"")  # a pasted value often keeps its quotes
+    if value.startswith(_REDIS_SCHEMES):
+        return value
+    hint = ""
+    if value.startswith("https://"):
+        hint = " It starts with https://, which looks like Upstash's REST URL; use the Redis URL (rediss://...)."
+    elif value.startswith("redis-cli"):
+        hint = " It looks like a redis-cli command; use only the URL after -u."
+    raise ValueError(
+        f"{name} must start with redis://, rediss:// or unix:// (value not shown).{hint}"
+    )
+
+
 def _env(name: str, default: str) -> str:
     raw = os.getenv(name)
     return raw.strip() if raw and raw.strip() else default
@@ -90,7 +113,7 @@ class Settings:
             trust_proxy=_env("QUERYGUARD_TRUST_PROXY", "0") == "1",
             fake_llm=_env("QUERYGUARD_FAKE_LLM", "0") == "1",
             live=_env("QUERYGUARD_LIVE", "1") != "0",
-            redis_url=_env("QUERYGUARD_REDIS_URL", "") or None,
+            redis_url=_redis_url(),
             state_prefix=_env("QUERYGUARD_STATE_PREFIX",
                               f"{os.getenv('VERCEL_ENV')}:" if on_vercel() and os.getenv("VERCEL_ENV") else "qg:"),
             vercel=on_vercel(),

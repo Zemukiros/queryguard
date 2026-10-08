@@ -117,3 +117,22 @@ def test_the_root_shim_is_what_vercel_imports(monkeypatch, tmp_path) -> None:
     assert asgi.app.title == "QueryGuard"
     config = json.loads((Path(__file__).resolve().parent.parent / "vercel.json").read_text())
     assert config["services"]["app"]["entrypoint"] == "asgi:app"
+
+
+@pytest.mark.parametrize(("value", "hint"), [
+    ("https://example.upstash.io", "REST URL"),
+    ("redis-cli --tls -u rediss://default:hunter2@example.upstash.io:6379", "redis-cli"),
+    ("example.upstash.io:6379", ""),
+])
+def test_a_malformed_redis_url_names_the_variable_not_the_value(monkeypatch, value, hint) -> None:
+    monkeypatch.setenv("QUERYGUARD_REDIS_URL", value)
+    with pytest.raises(ValueError) as caught:
+        Settings.from_env()
+    message = str(caught.value)
+    assert "QUERYGUARD_REDIS_URL" in message and "value not shown" in message and hint in message
+    assert "hunter2" not in message and "example.upstash.io" not in message
+
+
+def test_a_quoted_redis_url_is_accepted(monkeypatch) -> None:
+    monkeypatch.setenv("QUERYGUARD_REDIS_URL", ' "rediss://default:pw@example.upstash.io:6379" ')
+    assert Settings.from_env().redis_url == "rediss://default:pw@example.upstash.io:6379"
