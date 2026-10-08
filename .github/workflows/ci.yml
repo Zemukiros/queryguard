@@ -47,7 +47,7 @@ jobs:
               psql -v ON_ERROR_STOP=1 -q -U queryguard -d queryguard < "$f"
             echo "::endgroup::"
           done
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0  # no moving major tag upstream
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -101,7 +101,7 @@ jobs:
             docker exec -i ${{ job.services.postgres.id }} \
               psql -v ON_ERROR_STOP=1 -q -U queryguard -d queryguard < "$f"
           done
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.2.0  # no moving major tag upstream
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
