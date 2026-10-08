@@ -6,7 +6,7 @@ independent checks then look for answers that are plausible but wrong. QueryGuar
 rows, every check's verdict and a confidence score, and on a question with more than one reading it asks
 for clarification instead of guessing.
 
-**Status:** In development. The core pipeline, evals and HTTP API are done. The frontend is in progress.
+**Status:** In development. The core pipeline, evals, HTTP API and web UI run locally; it is not deployed yet.
 
 ## Safety first: generated SQL can't write
 
@@ -50,8 +50,9 @@ Every check passed it, because all three test whether the SQL matches the *quest
 - **Validate** (`validation/`): result-shape sanity checks, back-translation of the SQL into a question
   that is judged against the original, and a second, independently written query whose result must agree.
 - **Score** (`confidence.py`): a logistic model over every signal, fitted on the eval run (`calibration.json`).
-- **Serve** (`api/`): FastAPI. The pipeline is one async stream of typed stage events, served as JSON or as
-  Server-Sent Events. Per-client rate limits, a daily spend ceiling and a response cache sit in front.
+- **Serve** (`api/`, `web/`): FastAPI streams the pipeline as typed stage events, as JSON or Server-Sent
+  Events, behind per-client rate limits, a daily spend ceiling and a response cache. The React UI shows the
+  stages arriving live, explains the score signal by signal, and runs your own SQL through the same checks.
 
 ## Run it locally
 
@@ -68,5 +69,21 @@ uv run python -m queryguard.api # http://127.0.0.1:8000/docs
 curl -N -X POST localhost:8000/v1/query/stream \
      -H 'content-type: application/json' -d '{"question": "How many orders were cancelled?"}'
 ```
+
+### Web UI
+
+```bash
+make dev FAKE=1                 # API + UI, simulated model: $0, no API key needed
+make dev                        # API + UI, real model (each new question costs API calls)
+```
+
+Open http://localhost:5173. In demo mode (`FAKE=1`) a simulated model answers the eval set's questions from
+`evals/golden.yaml`. The guardrail, the read-only database and every check run for real. Try the three example
+questions: a normal one, an ambiguous one (pick a reading and it runs), and a pasted `DROP TABLE` (blocked,
+with the rule named).
+
+Vite + React + TypeScript (strict), Tailwind, TanStack Query, CodeMirror 6. API types are generated from the
+FastAPI OpenAPI schema (`make gen-api`); nothing is restated by hand. `make check` runs lint, typecheck,
+Vitest, Playwright (against demo mode) and the production build.
 
 Python 3.12 · uv · FastAPI · SQLAlchemy + psycopg 3 · sqlparse · pandas · PostgreSQL 16 · Anthropic SDK.

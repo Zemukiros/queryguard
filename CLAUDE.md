@@ -27,6 +27,10 @@ uv run python -m queryguard.pipeline "how many orders last quarter?"     # end t
 uv run python -m queryguard.api                       # HTTP API on :8000 (/docs); questions cost API calls
 uv run python -m queryguard.api export-feedback       # incorrect feedback -> evals/feedback_candidates.yaml
 
+make dev FAKE=1      # API (demo mode: llm/fake.py, $0) + Vite on :5173; plain `make dev` uses the real model
+make gen-api         # regenerate web/src/api/schema.ts after any API model change, then commit it
+make test            # pytest + vitest      make e2e   # Playwright vs demo mode      make check   # everything
+
 uv run python -m evals.run_golden                     # execute golden SQL, record row counts/hashes
 uv run python -m evals.mutations                      # build known-wrong negatives
 uv run python -m evals.run_eval                       # dry run, fake client, no spend
@@ -70,6 +74,13 @@ sequence and payloads); `run_question` / `run_answer` only drain it. Blocking SD
   ceiling read from the LLM call log, with a per-question reserve (503). History/feedback/cache live in SQLite
   (`store.py`, `data/app.db`) — never give the API a writable Postgres identity. Limits are env vars (`settings.py`).
   Stage exception text is logged, not returned.
+
+`web/` — Vite + React + TS (strict), Tailwind v4, TanStack Query, CodeMirror 6. `src/api/schema.ts` is GENERATED
+from the OpenAPI schema (`scripts/dump_openapi.py`, no server needed); use its types via `src/api/client.ts`, never
+hand-write a server shape. `src/api/sse.ts` reads SSE over POST (fetch + ReadableStream). `src/lib/stages.ts` owns
+the timeline model (order, verdicts: done / warn / blocked / skipped). Demo mode (`QUERYGUARD_FAKE_LLM=1`) answers
+from the golden set and logs to `logs/fake_llm_calls.jsonl`, never the real ledger. Response models subclass
+`events.Out` so defaulted fields are required in the generated types.
 
 `db/init/` holds the schema, seed data, the `queryguard_ro` role and column comments. `evals/` holds the golden
 set (`golden.yaml`), mutation negatives and the calibration harness; live run outputs are committed under
