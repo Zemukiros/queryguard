@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# No job needs ANTHROPIC_API_KEY: tests inject fake clients (conftest.py refuses
+# a real SDK client), and e2e runs the API in demo mode (QUERYGUARD_FAKE_LLM=1).
+env:
+  UV_VERSION: "0.12.9"
+  NODE_VERSION: "24"
+  # Database tests fail instead of skipping: see tests/conftest.py.
+  QUERYGUARD_REQUIRE_DB: "1"
+  DATABASE_URL: postgresql://queryguard:ci-owner@localhost:5432/queryguard
+  DATABASE_URL_READONLY: postgresql://queryguard_ro:ci-readonly@localhost:5432/queryguard
+
+jobs:
+  backend:
+    name: backend (pytest)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: queryguard
+          POSTGRES_PASSWORD: ci-owner
+          POSTGRES_DB: queryguard
+          POSTGRES_RO_PASSWORD: ci-readonly  # read by db/init/03_readonly_user.sql
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U queryguard -d queryguard"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialise the database from db/init (as the image entrypoint would)
+        run: |
+          for f in db/init/*.sql; do
+            echo "::group::$f"
+            docker exec -i ${{ job.services.postgres.id }} \
+              psql -v ON_ERROR_STOP=1 -q -U queryguard -d queryguard < "$f"
+            echo "::endgroup::"
+          done
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --frozen
+      - name: Build the schema cache (the sanity tests read its profile)
+        run: uv run python -m queryguard.schema.introspect --refresh > /dev/null
+      - name: Verify row counts and that the read-only role cannot write
+        run: uv run scripts/verify_db.py
+      - run: uv run pytest -q -rs
+
+  frontend:
+    name: frontend (eslint, tsc, vitest, build)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
+  e2e:
+    name: e2e (Playwright, demo mode)
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: queryguard
+          POSTGRES_PASSWORD: ci-owner
+          POSTGRES_DB: queryguard
+          POSTGRES_RO_PASSWORD: ci-readonly
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U queryguard -d queryguard"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Initialise the database from db/init
+        run: |
+          for f in db/init/*.sql; do
+            docker exec -i ${{ job.services.postgres.id }} \
+              psql -v ON_ERROR_STOP=1 -q -U queryguard -d queryguard < "$f"
+          done
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: uv sync --frozen
+      - run: uv run python -m queryguard.schema.introspect --refresh > /dev/null
+      - run: npm ci
+        working-directory: web
+      - name: Generated API types match the FastAPI schema
+        working-directory: web
+        run: |
+          npm run gen:api
+          git diff --exit-code -- src/api/schema.ts
+      - run: npx playwright install --with-deps chromium
+        working-directory: web
+      - run: npm run e2e
+        working-directory: web
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: web/test-results/
+          retention-days: 7

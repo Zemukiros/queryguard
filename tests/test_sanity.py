@@ -12,6 +12,7 @@ skips with the command that rebuilds it rather than inventing numbers.
 
 from __future__ import annotations
 
+import os
 from datetime import date
 from decimal import Decimal
 
@@ -42,6 +43,8 @@ from queryguard.validation.sanity import (
 def schema() -> DatabaseSchema:
     path = schema_cache_path()
     if not path.is_file():
+        if os.getenv("QUERYGUARD_REQUIRE_DB") == "1":  # CI: see conftest.py
+            pytest.fail(f"{path.name} not found; CI must build it before pytest", pytrace=False)
         pytest.skip(
             f"{path.name} not found, run `uv run python -m queryguard.schema.introspect --refresh`"
         )

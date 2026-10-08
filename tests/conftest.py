@@ -4,9 +4,15 @@ Most of these tests assert against the real seeded database, because the point
 of introspection is that it reports what is actually there. When the container
 is not running those tests skip with an actionable message rather than failing;
 the pure-rendering tests still run, so the suite is never vacuous.
+
+CI sets QUERYGUARD_REQUIRE_DB=1, which turns every such skip into a failure:
+there the database is part of the test, and a green run that skipped it would
+be a green run that tested nothing.
 """
 
 from __future__ import annotations
+
+import os
 
 import anthropic
 import pytest
@@ -17,13 +23,20 @@ from queryguard.config import database_url
 from queryguard.schema.introspect import DatabaseSchema, introspect_database
 
 
+def skip_or_fail(reason: str) -> None:
+    """Skip locally; fail when QUERYGUARD_REQUIRE_DB=1 (CI)."""
+    if os.getenv("QUERYGUARD_REQUIRE_DB") == "1":
+        pytest.fail(f"QUERYGUARD_REQUIRE_DB=1 but {reason}", pytrace=False)
+    pytest.skip(reason)
+
+
 @pytest.fixture(scope="session")
 def live_schema() -> DatabaseSchema:
     """Introspect the running database once for the whole session."""
     try:
         return introspect_database()
     except (SQLAlchemyError, RuntimeError) as exc:
-        pytest.skip(f"queryguard-db not reachable, run `docker compose up -d` ({exc})")
+        skip_or_fail(f"queryguard-db not reachable, run `docker compose up -d` ({exc})")
 
 
 @pytest.fixture(scope="session")
@@ -42,7 +55,7 @@ def live_database() -> None:
         finally:
             engine.dispose()
     except (SQLAlchemyError, RuntimeError) as exc:
-        pytest.skip(
+        skip_or_fail(
             f"queryguard-db not reachable as queryguard_ro, "
             f"run `docker compose up -d` ({exc})"
         )
