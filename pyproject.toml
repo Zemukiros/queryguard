@@ -32,3 +32,9 @@ package = true
 testpaths = ["tests"]
 # The repo root, so tests can import the top-level `evals` package.
 pythonpath = ["."]
+
+[dependency-groups]
+eval = [
+    "matplotlib>=3.11.2",
+    "scikit-learn>=1.9.1",
+]

@@ -39,11 +39,15 @@ from queryguard.validation.backtranslate import (
     judge_alignment,
 )
 from queryguard.validation.confidence import (
+    CALIBRATION_PATH,
     SCORER_VERSION,
+    V0_VERSION,
     V0_WEIGHTS,
+    WEIGHTS,
     Features,
     build_features,
     encode,
+    load_weights,
     log_features,
     row_count_bucket,
     score,
@@ -474,27 +478,57 @@ def test_the_encoded_vector_has_a_weight_for_every_feature() -> None:
     assert set(encode(_features())) == set(V0_WEIGHTS) - {"bias"}
 
 
-def test_a_clean_agreeing_run_scores_high() -> None:
-    confidence, breakdown = score(_features())
+def test_v0_a_clean_agreeing_run_scores_high() -> None:
+    confidence, breakdown = score(_features(), V0_WEIGHTS)
     assert confidence > 0.9
     assert breakdown["agreement_agree"] == V0_WEIGHTS["agreement_agree"]
 
 
-def test_low_alignment_and_disagreement_score_low() -> None:
+@pytest.mark.parametrize("weights", [V0_WEIGHTS, None], ids=["v0", "runtime"])
+def test_low_alignment_and_disagreement_score_low(weights) -> None:
     hallucinated = _features(alignment=0.2, discrepancy_count=2, agreement="disagree")
-    confidence, breakdown = score(hallucinated)
+    confidence, breakdown = score(hallucinated, weights)
     assert confidence < 0.1
     assert breakdown["agreement_disagree"] < 0 and breakdown["alignment_centered"] < 0
 
 
-def test_each_bad_signal_alone_lowers_the_score() -> None:
+BAD_SIGNALS = [
+    {"alignment": 0.3}, {"discrepancy_count": 1}, {"sanity_fail": 1}, {"sanity_warn": 1},
+    {"agreement": "disagree"}, {"agreement": "incomparable"}, {"row_count_bucket": "0"},
+    {"alignment": None},
+]
+
+
+def test_v0_each_bad_signal_alone_lowers_the_score() -> None:
+    clean, _ = score(_features(), V0_WEIGHTS)
+    for override in [*BAD_SIGNALS, {"self_confidence": 0.4}]:
+        assert score(_features(**override), V0_WEIGHTS)[0] < clean, override
+
+
+def test_runtime_weights_each_bad_signal_alone_lowers_the_score() -> None:
+    """Whatever the calibration fitted, no warning sign may raise the score."""
     clean, _ = score(_features())
-    for override in [
-        {"alignment": 0.3}, {"discrepancy_count": 1}, {"sanity_fail": 1}, {"sanity_warn": 1},
-        {"agreement": "disagree"}, {"agreement": "incomparable"}, {"row_count_bucket": "0"},
-        {"alignment": None}, {"self_confidence": 0.4},
-    ]:
+    for override in BAD_SIGNALS:
         assert score(_features(**override))[0] < clean, override
+
+
+def test_the_committed_calibration_is_what_runs() -> None:
+    assert CALIBRATION_PATH.exists()
+    assert SCORER_VERSION.startswith("calibrated-")
+    assert WEIGHTS == load_weights()[0] and set(WEIGHTS) == set(V0_WEIGHTS)
+    # Fitted without self-confidence: it is an injected constant on most training rows.
+    assert WEIGHTS["self_confidence"] == 0.0
+
+
+def test_a_missing_calibration_falls_back_to_v0(tmp_path) -> None:
+    assert load_weights(tmp_path / "absent.json") == (V0_WEIGHTS, V0_VERSION)
+
+
+def test_a_calibration_for_other_features_is_refused(tmp_path) -> None:
+    path = tmp_path / "calibration.json"
+    path.write_text(json.dumps({"version": "x", "intercept": 0.0, "weights": {"self_confidence": 1.0}}))
+    with pytest.raises(ValueError, match="do not match"):
+        load_weights(path)
 
 
 def test_an_unexecuted_query_scores_zero() -> None:
@@ -508,7 +542,7 @@ def test_every_scored_run_is_logged_as_a_training_row(tmp_path) -> None:
     log_features(question=QUESTION, sql=WRONG_SQL, features=features, confidence=confidence, breakdown=breakdown, path=path)
 
     [row] = [json.loads(line) for line in path.read_text().splitlines()]
-    assert row["scorer_version"] == SCORER_VERSION == "v0-hand-set"
+    assert row["scorer_version"] == SCORER_VERSION
     assert row["question"] == QUESTION and row["sql"] == WRONG_SQL
     assert row["features"]["agreement"] == "disagree"
     assert row["encoded"]["agreement_disagree"] == 1.0

@@ -30,7 +30,7 @@ from collections import Counter
 from evals.common import run_guarded
 from evals.run_eval import GENERATED, GOLDEN, MUTATION, RESULTS_DIR, build_items, compare_to_golden, golden_frames
 from queryguard.validation.agreement import AGREE, evaluate_second_sql
-from queryguard.validation.confidence import Features, score
+from queryguard.validation.confidence import V0_WEIGHTS, Features, score
 
 DETECTORS = ("sanity", "alignment", "agreement")
 
@@ -60,7 +60,7 @@ def recompute_row(row: dict, item, frames: dict) -> dict:
         row["label"], row["label_reason"] = label, reason
 
     if row.get("features"):
-        confidence, breakdown = score(Features(**row["features"]))
+        confidence, breakdown = score(Features(**row["features"]), V0_WEIGHTS)
         if abs(confidence - row["confidence"]) > 1e-12:
             corrections["confidence"] = row["confidence"]
         row["confidence"], row["confidence_breakdown"] = confidence, breakdown

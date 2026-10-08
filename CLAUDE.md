@@ -30,6 +30,7 @@ uv run python -m evals.mutations                      # build known-wrong negati
 uv run python -m evals.run_eval                       # dry run, fake client, no spend
 uv run python -m evals.run_eval --live --run-id ID    # real API spend; same ID resumes
 uv run python -m evals.recompute --run-id ID          # re-derive labels/confidence offline
+uv run python -m evals.calibrate --run-id ID          # fit confidence weights offline (needs `uv sync --group eval`)
 ```
 
 Changing `db/init/` requires `docker compose down -v` (wipes the volume) to take effect.
@@ -56,11 +57,12 @@ distinct type (`ClarificationNeeded`, `CannotAnswer`, guardrail rejection, execu
 - `executor.py` — four nested boundaries: read-only role → `SET TRANSACTION READ ONLY` + always rollback →
   transaction-local `statement_timeout` → `EXPLAIN` row-estimate check. Never raises; every outcome is an `ExecutionResult`.
 - `validation/` — `sanity.py` (result-shape flags; advice, not a gate), `backtranslate.py`, `agreement.py`,
-  `confidence.py`. `pipeline.MAX_CALLS_PER_QUESTION` (4) bounds API calls per question.
+  `confidence.py` (weights load from `calibration.json`, written by `evals/calibrate.py`; v0 hand-set
+  weights are the fallback). `pipeline.MAX_CALLS_PER_QUESTION` (4) bounds API calls per question.
 
 `db/init/` holds the schema, seed data, the `queryguard_ro` role and column comments. `evals/` holds the golden
 set (`golden.yaml`), mutation negatives and the calibration harness; live run outputs are committed under
-`evals/results/<run-id>.*`, dry runs are gitignored.
+`evals/results/<run-id>.*`, dry runs are gitignored. Results write-up: `docs/EVAL_RESULTS.md`.
 
 ## Conventions
 

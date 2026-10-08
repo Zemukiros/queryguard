@@ -5,25 +5,29 @@ model's own confidence, how well the back-translated question aligns with the
 asked one, the sanity flags, whether a second query agreed, whether the
 guardrail had to rewrite the SQL, and how many rows came back.
 
-    !! The v0 weights below are HAND-SET AND TEMPORARY. !!
+The score is a logistic model -- a weighted sum of the encoded features passed
+through a sigmoid. Its weights come from `calibration.json` beside this module,
+a logistic regression fitted to a labelled eval run by `evals/calibrate.py`
+(see docs/EVAL_RESULTS.md for how it was validated). The file is loaded once at
+import; if it is missing, the hand-set V0_WEIGHTS below are used instead and
+SCORER_VERSION says so. A file that exists but does not match the feature set
+is an error, not a silent fallback.
 
-They were chosen to rank obviously good and obviously bad runs sensibly, not
-fitted to anything, and the number they produce is not a probability anyone
-should quote. The next session replaces them with a logistic regression
-calibrated on labelled runs. The functional form is already logistic -- a
-weighted sum passed through a sigmoid -- so the replacement swaps the weight
-table and nothing else.
+V0_WEIGHTS were chosen to rank obviously good and obviously bad runs sensibly,
+not fitted to anything. They are kept as the fallback and as the baseline the
+calibration is measured against.
 
-That is why every run is appended to `logs/confidence_features.jsonl`, with the
-raw features, the encoded vector the weights apply to, the score, and a `label`
+Every run is appended to `logs/confidence_features.jsonl`, with the raw
+features, the encoded vector the weights apply to, the score, and a `label`
 left null for a human (or an eval suite) to fill in. That file is the training
-set. A run that is not logged cannot be learned from, so logging is not
-optional and does not depend on whether validation succeeded.
+set for the next calibration. A run that is not logged cannot be learned from,
+so logging is not optional and does not depend on whether validation succeeded.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 from dataclasses import asdict, dataclass
@@ -34,7 +38,8 @@ from typing import Any
 from queryguard.config import REPO_ROOT
 from queryguard.llm.client import append_log
 
-SCORER_VERSION = "v0-hand-set"
+V0_VERSION = "v0-hand-set"
+CALIBRATION_PATH = Path(__file__).with_name("calibration.json")
 
 AGREEMENT_NOT_RUN = "not_run"
 
@@ -42,8 +47,7 @@ AGREEMENT_NOT_RUN = "not_run"
 # a scalar answer, a short list, a long one, and one that hit the cap.
 ROW_BUCKETS = ("0", "1", "2-10", "11-100", "101-999", "capped")
 
-# TEMPORARY. Logit-space weights; see the module docstring before trusting them.
-# Each encoded feature is multiplied by its weight and summed with the bias.
+# Hand-set fallback, logit-space; see the module docstring. Each encoded feature is multiplied by its weight and summed with the bias.
 V0_WEIGHTS: dict[str, float] = {
     "bias": -1.0,
     # The model's 0-1 self-estimate. Informative, but models are overconfident,
@@ -69,6 +73,21 @@ V0_WEIGHTS: dict[str, float] = {
 }
 
 _MAX_DISCREPANCIES = 4  # beyond this the judge is restating, not finding more
+
+
+def load_weights(path: Path = CALIBRATION_PATH) -> tuple[dict[str, float], str]:
+    """(weights incl. bias, scorer version) from a calibration file, or v0 if there is none."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return dict(V0_WEIGHTS), V0_VERSION
+    weights = {"bias": float(data["intercept"]), **{k: float(v) for k, v in data["weights"].items()}}
+    if set(weights) != set(V0_WEIGHTS):
+        raise ValueError(f"{path}: weights {sorted(weights)} do not match features {sorted(V0_WEIGHTS)}")
+    return weights, data["version"]
+
+
+WEIGHTS, SCORER_VERSION = load_weights()
 
 
 @dataclass(frozen=True)
@@ -157,7 +176,7 @@ def score(features: Features, weights: dict[str, float] | None = None) -> tuple[
     """
     if not features.executed:
         return 0.0, {}
-    weights = weights or V0_WEIGHTS
+    weights = weights or WEIGHTS
     breakdown = {"bias": weights["bias"]}
     for name, value in encode(features).items():
         contribution = weights[name] * value
