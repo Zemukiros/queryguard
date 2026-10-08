@@ -29,13 +29,12 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from queryguard.config import REPO_ROOT
+from queryguard.config import log_target
 from queryguard.llm.client import append_log
 
 V0_VERSION = "v0-hand-set"
@@ -237,8 +236,9 @@ def contributions(features: Features, weights: dict[str, float] | None = None) -
 
 
 def features_log_path() -> Path:
-    override = os.getenv("QUERYGUARD_CONFIDENCE_LOG")
-    return Path(override) if override else REPO_ROOT / "logs" / "confidence_features.jsonl"
+    # Calibration training data. Off on Vercel: calibration is frozen, and an
+    # unlabelled row in a serverless log would never be collected anyway.
+    return log_target("QUERYGUARD_CONFIDENCE_LOG", "confidence_features.jsonl", on_platform="off")
 
 
 def log_features(

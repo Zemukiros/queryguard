@@ -1,4 +1,4 @@
-"""Query history, feedback and the response cache, in SQLite.
+"""Query history, feedback and the response cache, in SQLite (LocalState's backend).
 
 Not in Postgres on purpose: the API reaches Postgres only as `queryguard_ro`,
 whose inability to write is the project's first boundary. Giving the API a
@@ -24,11 +24,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from queryguard.config import REPO_ROOT
-
-FEEDBACK_CANDIDATES = REPO_ROOT / "evals" / "feedback_candidates.yaml"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -43,7 +38,8 @@ CREATE TABLE IF NOT EXISTS queries (
     cost_usd    REAL NOT NULL,
     elapsed_ms  INTEGER NOT NULL,
     result_json TEXT NOT NULL,
-    sql_source  TEXT NOT NULL DEFAULT 'model'
+    sql_source  TEXT NOT NULL DEFAULT 'model',
+    mode        TEXT NOT NULL DEFAULT 'live'
 );
 CREATE INDEX IF NOT EXISTS queries_by_client ON queries (client, created_at);
 CREATE TABLE IF NOT EXISTS feedback (
@@ -70,10 +66,12 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn, conn:
             conn.executescript(_SCHEMA)
-            # Databases created before sql_source existed.
+            # Databases created before sql_source or mode existed.
             columns = {row[1] for row in conn.execute("PRAGMA table_info(queries)")}
             if "sql_source" not in columns:
                 conn.execute("ALTER TABLE queries ADD COLUMN sql_source TEXT NOT NULL DEFAULT 'model'")
+            if "mode" not in columns:
+                conn.execute("ALTER TABLE queries ADD COLUMN mode TEXT NOT NULL DEFAULT 'live'")
             conn.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('client_salt', ?)", (secrets.token_hex(16),)
             )
@@ -93,21 +91,22 @@ class Store:
     def record(
         self, *, query_id: str, client: str, question: str, outcome: str, confidence: float | None,
         cached: bool, cost_usd: float, elapsed_ms: int, result: dict[str, Any], sql_source: str = "model",
+        mode: str = "live",
     ) -> None:
         with closing(self._connect()) as conn, conn:
             conn.execute(
                 """INSERT INTO queries (query_id, created_at, client, question, outcome, confidence, cached,
-                                        cost_usd, elapsed_ms, result_json, sql_source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                        cost_usd, elapsed_ms, result_json, sql_source, mode)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (query_id, _now(), client, question, outcome, confidence, int(cached), cost_usd,
-                 elapsed_ms, json.dumps(result, default=str), sql_source),
+                 elapsed_ms, json.dumps(result, default=str), sql_source, mode),
             )
 
     def history(self, client: str, limit: int) -> list[dict[str, Any]]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 """SELECT q.query_id, q.created_at, q.question, q.outcome, q.confidence, q.cached,
-                          q.cost_usd, q.sql_source, f.correct, f.note, f.created_at AS feedback_at
+                          q.cost_usd, q.sql_source, q.mode, f.correct, f.note, f.created_at AS feedback_at
                    FROM queries AS q LEFT JOIN feedback AS f USING (query_id)
                    WHERE q.client = ? ORDER BY q.created_at DESC LIMIT ?""",
                 (client, limit),
@@ -148,38 +147,6 @@ class Store:
                    WHERE f.correct = 0 ORDER BY f.created_at"""
             ).fetchall()
         return [dict(r) for r in rows]
-
-    def export_feedback_candidates(self, path: Path = FEEDBACK_CANDIDATES) -> tuple[Path, int]:
-        """Write answers marked incorrect as golden-set candidates. Returns (path, count).
-
-        Each candidate carries what the pipeline did and blank golden fields:
-        a person writes the golden SQL and category, then moves the entry into
-        golden.yaml. Nothing here is a golden case until that review.
-        """
-        candidates = []
-        for row in self.incorrect_feedback():
-            result = json.loads(row["result_json"])
-            candidates.append({
-                "query_id": row["query_id"],
-                "asked_at": row["created_at"],
-                "question": row["question"],
-                "outcome": row["outcome"],
-                "confidence": row["confidence"],
-                "sql": result.get("sql"),
-                "executed_sql": result.get("executed_sql"),
-                "feedback_note": row["note"],
-                "feedback_at": row["feedback_at"],
-                "category": None,
-                "golden_sql": None,
-            })
-        path.parent.mkdir(parents=True, exist_ok=True)
-        header = (
-            "# Answers users marked incorrect, exported from the API's feedback store.\n"
-            "# Review each: write golden_sql and category, then move it into golden.yaml.\n"
-        )
-        body = yaml.safe_dump({"candidates": candidates}, sort_keys=False, allow_unicode=True, width=100)
-        path.write_text(header + body, encoding="utf-8")
-        return path, len(candidates)
 
     # ------------------------------------------------------------------ cache
 

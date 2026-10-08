@@ -1,0 +1,22 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "web": {
+      "root": "web/",
+      "framework": "vite"
+    },
+    "app": {
+      "root": "./",
+      "framework": "fastapi",
+      "entrypoint": "asgi:app",
+      "buildCommand": "uv run --frozen python -m queryguard.schema.introspect --refresh > /dev/null && echo 'schema cache built' || echo 'schema cache NOT built; the API will introspect at first use'"
+    }
+  },
+  "rewrites": [
+    { "source": "/v1/(.*)", "destination": { "service": "app" } },
+    { "source": "/healthz", "destination": { "service": "app" } },
+    { "source": "/docs", "destination": { "service": "app" } },
+    { "source": "/openapi.json", "destination": { "service": "app" } },
+    { "source": "/(.*)", "destination": { "service": "web" } }
+  ]
+}

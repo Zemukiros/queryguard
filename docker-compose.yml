@@ -31,6 +31,19 @@ services:
       retries: 10
       start_period: 10s
 
+  # App state (rate limits, spend, cache, history) for the API: the same Redis
+  # code path as production. Tests use it too (QUERYGUARD_TEST_REDIS_URL).
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   # One-shot: introspect the schema as the owner and cache it for the API, so
   # the API container only ever holds the read-only role's credentials.
   introspect:
@@ -58,12 +71,14 @@ services:
       QUERYGUARD_RATE_PER_DAY: ${QUERYGUARD_RATE_PER_DAY:-50}
       # nginx in the web container is the only client; trust its X-Forwarded-For.
       QUERYGUARD_TRUST_PROXY: "1"
+      QUERYGUARD_REDIS_URL: redis://redis:6379/0
     volumes:
       - state:/app/state
-      - appdata:/app/data
     depends_on:
       introspect:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
   web:
     build: ./web
@@ -77,4 +92,3 @@ services:
 volumes:
   pgdata:
   state:
-  appdata:

@@ -11,6 +11,12 @@ Three things this owns that the SDK does not:
    understates a cache-miss call and overstates every cache hit after it.
 3. A durable JSONL log, so `running_total_usd()` survives process restarts.
 
+The cap and the log sit behind `CallGuard`. The default guard is the process cap
+and the JSONL file, which is what the CLI, the evals and tests use. The API
+passes its own guard (queryguard.state): a daily call cap and a spend ledger
+shared by every instance, because a per-process counter means nothing when a
+serverless platform runs twenty processes and recycles them at will.
+
 Model IDs and prices below are the current published values and are complete as
 written -- do NOT append a date suffix to a model ID; that produces a 404.
 """
@@ -21,13 +27,14 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from queryguard.config import REPO_ROOT, load_env
+from queryguard.config import load_env, log_target
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +42,9 @@ DEFAULT_MODEL = "claude-sonnet-5"
 
 # Runaway-loop guard. Override with QUERYGUARD_MAX_REQUESTS.
 DEFAULT_MAX_REQUESTS = 50
+
+# The most API calls one question may make (pipeline.py enforces it).
+MAX_CALLS_PER_QUESTION = 4
 
 # Cache multipliers apply to the model's *input* rate.
 CACHE_WRITE_MULTIPLIER = 1.25  # 5-minute TTL (a 1-hour TTL would be 2.0x)
@@ -63,6 +73,23 @@ PRICING: dict[str, ModelPricing] = {
     # _warn_if_cache_was_ignored() stays even though today's prefix is fine.
     "claude-haiku-4-5": ModelPricing(input_usd_per_mtok=1.00, output_usd_per_mtok=5.00),
 }
+
+
+def sdk_error_types() -> tuple[type[BaseException], ...]:
+    """(anthropic.APIError,) once the SDK is loaded, else ().
+
+    Callers that classify errors use this instead of importing anthropic, so a
+    process that never builds a real client (demo mode, /healthz) never pays
+    for the import. If the SDK was never loaded, none of its errors can occur.
+    """
+    sdk = sys.modules.get("anthropic")
+    return (sdk.APIError,) if sdk is not None else ()
+
+
+def is_auth_failure(exc: BaseException | None) -> bool:
+    """The API refused the key: missing, expired or revoked (401), or not allowed (403)."""
+    sdk = sys.modules.get("anthropic")
+    return sdk is not None and isinstance(exc, (sdk.AuthenticationError, sdk.PermissionDeniedError))
 
 
 class RequestCapExceeded(RuntimeError):
@@ -96,8 +123,53 @@ def max_requests() -> int:
 
 
 def log_path() -> Path:
-    override = os.getenv("QUERYGUARD_LLM_LOG")
-    return Path(override) if override else REPO_ROOT / "logs" / "llm_calls.jsonl"
+    # On Vercel the API's real ledger is Redis (state/redis.py), so the file is off.
+    return log_target("QUERYGUARD_LLM_LOG", "llm_calls.jsonl", on_platform="off")
+
+
+class CallGuard:
+    """Admits each API call before it is made and records it afterwards.
+
+    This default is the process-wide request cap plus the JSONL log.
+    """
+
+    def before_call(self) -> None:
+        """Raise RequestCapExceeded to refuse the call. Runs before any network I/O."""
+        global _request_count
+        cap = max_requests()
+        if _request_count >= cap:
+            # Raise before incrementing and before any network call, so the cap
+            # is a real ceiling on API requests rather than on attempts.
+            raise RequestCapExceeded(
+                f"request cap of {cap} reached ({_request_count} made); "
+                "raise QUERYGUARD_MAX_REQUESTS if this is intentional"
+            )
+        _request_count += 1
+
+    def after_call(self, entry: dict[str, Any], log: Path | None = None) -> None:
+        """Record a made call: its cost (estimated_cost_usd) and log fields."""
+        append_log(entry, log)
+
+
+PROCESS_GUARD = CallGuard()
+
+
+class DemoCallGuard(CallGuard):
+    """For the simulated model: never capped, never counted as spend.
+
+    Calls go to their own log (or none), so the real ledger -- and the spend
+    ceiling read from it -- never sees them.
+    """
+
+    def __init__(self, log: Path | None = None) -> None:
+        self._log = log
+
+    def before_call(self) -> None:
+        pass
+
+    def after_call(self, entry: dict[str, Any], log: Path | None = None) -> None:
+        if self._log is not None:
+            append_log(entry, self._log)
 
 
 # ------------------------------------------------------------------- costing
@@ -212,10 +284,17 @@ def prompt_hash(system_blocks: Any, user_message: str) -> str:
 
 
 def append_log(entry: dict[str, Any], path: Path | None = None) -> Path:
+    """Append one JSON line. A path of "-" prints it to stdout; "off" drops it."""
     target = path or log_path()
+    line = json.dumps(entry, sort_keys=True)
+    if str(target) == "off":
+        return target
+    if str(target) == "-":
+        print(line, flush=True)
+        return target
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        handle.write(line + "\n")
     return target
 
 
@@ -255,8 +334,9 @@ class CallResult:
 class LLMClient:
     """Anthropic SDK wrapper. Pass `sdk_client` to inject a fake in tests."""
 
-    def __init__(self, sdk_client: Any = None, model: str = DEFAULT_MODEL) -> None:
+    def __init__(self, sdk_client: Any = None, model: str = DEFAULT_MODEL, guard: CallGuard | None = None) -> None:
         self.model = model
+        self.guard = guard or PROCESS_GUARD
         if sdk_client is not None:
             self._client = sdk_client
         else:
@@ -280,18 +360,8 @@ class LLMClient:
         output_config: dict[str, Any] | None = None,
         log: Path | None = None,
     ) -> CallResult:
-        """One structured-output call, capped, costed and logged."""
-        global _request_count
-
-        cap = max_requests()
-        if _request_count >= cap:
-            # Raise before incrementing and before any network call, so the cap
-            # is a real ceiling on API requests rather than on attempts.
-            raise RequestCapExceeded(
-                f"request cap of {cap} reached ({_request_count} made); "
-                "raise QUERYGUARD_MAX_REQUESTS if this is intentional"
-            )
-        _request_count += 1
+        """One structured-output call, capped, costed and logged (see CallGuard)."""
+        self.guard.before_call()
 
         kwargs: dict[str, Any] = {
             "model": self.model,
@@ -315,7 +385,7 @@ class LLMClient:
             # every cost total built on this log undercounts. The first eval
             # run lost four calls this way.
             if _was_answered(exc):
-                append_log(
+                self.guard.after_call(
                     {
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "model": self.model,
@@ -336,7 +406,7 @@ class LLMClient:
         _warn_if_cache_was_ignored(self.model, system_blocks, usage)
         cost = estimate_cost_usd(self.model, usage)
 
-        append_log(
+        self.guard.after_call(
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "model": self.model,

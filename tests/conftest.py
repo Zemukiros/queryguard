@@ -78,5 +78,6 @@ def _no_real_api_and_no_real_logs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(anthropic, "Anthropic", _refuse)
     monkeypatch.setenv("QUERYGUARD_LLM_LOG", str(tmp_path / "llm_calls.jsonl"))
+    monkeypatch.setenv("QUERYGUARD_FAKE_LLM_LOG", str(tmp_path / "fake_llm_calls.jsonl"))
     monkeypatch.setenv("QUERYGUARD_EXECUTOR_LOG", str(tmp_path / "executions.jsonl"))
     monkeypatch.setenv("QUERYGUARD_CONFIDENCE_LOG", str(tmp_path / "confidence_features.jsonl"))

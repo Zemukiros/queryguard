@@ -15,6 +15,7 @@ dependencies = [
     "pydantic",
     "pytest",
     "pyyaml>=6.0.3",
+    "redis==8.1.0",
 ]
 
 [build-system]

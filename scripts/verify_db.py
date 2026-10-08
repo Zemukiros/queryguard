@@ -144,6 +144,18 @@ def main() -> int:
         print(f"  connected as {user!r} to {db!r}")
 
         with ro.cursor() as cur:
+            cur.execute(
+                "SELECT rolsuper, rolcreatedb, rolcreaterole, rolinherit, rolbypassrls "
+                "FROM pg_roles WHERE rolname = current_user"
+            )
+            attributes = dict(zip(("superuser", "createdb", "createrole", "inherit", "bypassrls"), cur.fetchone()))
+        if any(attributes.values()):
+            fail(f"role attributes must all be off: {attributes}")
+            failures += 1
+        else:
+            ok("role attributes: no superuser, createdb, createrole, inherit or bypassrls")
+
+        with ro.cursor() as cur:
             cur.execute("SHOW default_transaction_read_only")
             print(f"  session default_transaction_read_only = {cur.fetchone()[0]}")
             # That session default is a safety net, not the boundary: it is a USERSET

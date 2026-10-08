@@ -4,8 +4,10 @@ Both are checked before a question reaches the pipeline, so a refused request
 costs nothing. A cache hit is checked before either and consumes neither: it
 makes no API call, so there is nothing to protect.
 
-The rate limiter is in memory. It resets when the process restarts, which is
-acceptable for a single-instance demo and would not be for several instances.
+These are the one-process versions, used by queryguard.state.LocalState
+(which also holds the in-flight spend reservations). The rate limiter is in
+memory and resets when the process restarts: fine for one instance, wrong for
+several -- RedisState shares both across instances.
 """
 
 from __future__ import annotations
@@ -76,30 +78,3 @@ def seconds_until_utc_midnight(now: datetime | None = None) -> int:
     now = now or datetime.now(timezone.utc)
     midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
     return max(1, int((midnight - now).total_seconds()))
-
-
-class SpendCeiling:
-    """Admits a question only if today's spend plus every in-flight reserve stays under the ceiling.
-
-    The log only learns a call's cost after the call, so questions already
-    running are counted at `reserve_usd` each until they finish.
-    """
-
-    def __init__(self, ceiling_usd: float, reserve_usd: float) -> None:
-        self.ceiling_usd = ceiling_usd
-        self.reserve_usd = reserve_usd
-        self._in_flight = 0
-        self._lock = threading.Lock()
-
-    def try_admit(self) -> tuple[bool, float]:
-        """(admitted, spent today). An admitted caller must call release()."""
-        with self._lock:
-            spent = spent_today_usd()
-            if spent + (self._in_flight + 1) * self.reserve_usd > self.ceiling_usd:
-                return False, spent
-            self._in_flight += 1
-            return True, spent
-
-    def release(self) -> None:
-        with self._lock:
-            self._in_flight = max(0, self._in_flight - 1)

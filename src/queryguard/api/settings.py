@@ -11,22 +11,34 @@ setting variables, never by editing code:
     QUERYGUARD_APP_DB                SQLite file for history, feedback and cache (data/app.db)
     QUERYGUARD_TRUST_PROXY           1 = client IP from the last X-Forwarded-For hop (0)
     QUERYGUARD_FAKE_LLM              1 = answer from llm/fake.py, never the API; $0 (0)
+    QUERYGUARD_LIVE                  0 = kill switch: every question runs in demo mode (1)
+    QUERYGUARD_REDIS_URL             app state in Redis (queryguard.state.redis), shared by every
+                                     instance; unset = in-process state (queryguard.state.local)
+    QUERYGUARD_STATE_PREFIX          prefix for every Redis key, so deployments can share one
+                                     database without seeing each other's state (qg:; on Vercel,
+                                     "<VERCEL_ENV>:", i.e. production: or preview:)
+    QUERYGUARD_DAILY_CALL_CAP        LLM calls per UTC day across all instances (Redis state) (200)
+    QUERYGUARD_RESERVATION_TTL_S     a spend reservation expires after this, so one held by a
+                                     crashed instance frees itself (300, the platform time limit)
 
-Fake mode also points the LLM call log at logs/fake_llm_calls.jsonl (unless
-QUERYGUARD_LLM_LOG is set), so the real ledger -- and the spend ceiling read
-from it -- never sees fake calls, and lifts the process request cap, which
-exists to protect money that fake mode does not spend.
+    QUERYGUARD_FAKE_LLM_LOG          where simulated calls are logged with local state
+                                     (logs/fake_llm_calls.jsonl); with Redis state they are not logged
+
+Modes. A question runs live (the real model) unless one of these sends it to
+demo mode (llm/fake.py: $0, answers the eval set's questions), in this order:
+QUERYGUARD_FAKE_LLM=1 (a demo-only deployment), QUERYGUARD_LIVE=0 (the kill
+switch), today's spend ceiling, today's call cap. The answer and /healthz say
+which mode and why. Simulated calls never touch the real ledger or the caps.
 
 The reserve is about twice the most expensive question in the live eval run
 ($0.0255), so questions already running cannot carry spend past the ceiling.
 
-Spend is read from the LLM call log (QUERYGUARD_LLM_LOG, default
-logs/llm_calls.jsonl), which every API call appends to -- including CLI runs on
-the same host, so the ceiling errs towards stopping early.
-
-QUERYGUARD_MAX_REQUESTS (llm/client.py) still applies: it is a process-lifetime
-runaway guard, 50 by default, i.e. about 12 questions per server start. A
-long-running server should raise it; the daily ceiling is the real control.
+With local state, spend is read from the LLM call log (QUERYGUARD_LLM_LOG,
+default logs/llm_calls.jsonl) -- including CLI runs on the same host, so the
+ceiling errs towards stopping early -- and the daily call cap is counted in
+memory. With Redis state both are shared by every instance. The API's own
+calls are capped by QUERYGUARD_DAILY_CALL_CAP; QUERYGUARD_MAX_REQUESTS
+(llm/client.py) now guards only the CLI and the evals.
 """
 
 from __future__ import annotations
@@ -35,7 +47,30 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from queryguard.config import REPO_ROOT, load_env
+from queryguard.config import REPO_ROOT, load_env, on_vercel
+
+
+_REDIS_SCHEMES = ("redis://", "rediss://", "unix://")
+
+
+def _redis_url(name: str = "QUERYGUARD_REDIS_URL") -> str | None:
+    """The Redis URL, checked here so a bad one fails at startup with a message
+    that names the variable. Its value is never included: it holds a password.
+    """
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip().strip("'\"")  # a pasted value often keeps its quotes
+    if value.startswith(_REDIS_SCHEMES):
+        return value
+    hint = ""
+    if value.startswith("https://"):
+        hint = " It starts with https://, which looks like Upstash's REST URL; use the Redis URL (rediss://...)."
+    elif value.startswith("redis-cli"):
+        hint = " It looks like a redis-cli command; use only the URL after -u."
+    raise ValueError(
+        f"{name} must start with redis://, rediss:// or unix:// (value not shown).{hint}"
+    )
 
 
 def _env(name: str, default: str) -> str:
@@ -52,7 +87,14 @@ class Settings:
     frontend_origins: tuple[str, ...] = ("http://localhost:3000",)
     db_path: Path = field(default_factory=lambda: REPO_ROOT / "data" / "app.db")
     trust_proxy: bool = False
+    # On Vercel the client IP is read from x-real-ip, which Vercel's edge sets.
+    vercel: bool = False
     fake_llm: bool = False
+    live: bool = True
+    redis_url: str | None = None
+    state_prefix: str = "qg:"
+    daily_call_cap: int = 200
+    reservation_ttl_s: float = 300.0
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -70,4 +112,11 @@ class Settings:
             db_path=REPO_ROOT / _env("QUERYGUARD_APP_DB", "data/app.db"),
             trust_proxy=_env("QUERYGUARD_TRUST_PROXY", "0") == "1",
             fake_llm=_env("QUERYGUARD_FAKE_LLM", "0") == "1",
+            live=_env("QUERYGUARD_LIVE", "1") != "0",
+            redis_url=_redis_url(),
+            state_prefix=_env("QUERYGUARD_STATE_PREFIX",
+                              f"{os.getenv('VERCEL_ENV')}:" if on_vercel() and os.getenv("VERCEL_ENV") else "qg:"),
+            vercel=on_vercel(),
+            daily_call_cap=int(_env("QUERYGUARD_DAILY_CALL_CAP", "200")),
+            reservation_ttl_s=float(_env("QUERYGUARD_RESERVATION_TTL_S", "300")),
         )

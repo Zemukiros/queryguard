@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from queryguard.api.settings import Settings
-from queryguard.api.store import FEEDBACK_CANDIDATES, Store
+from queryguard.state import FEEDBACK_CANDIDATES, make_state
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.command == "export-feedback":
-        path, count = Store(Settings.from_env().db_path).export_feedback_candidates(args.out)
+        path, count = make_state(Settings.from_env()).export_feedback_candidates(args.out)
         print(f"wrote {count} candidate(s) to {path}")
         return 0
 

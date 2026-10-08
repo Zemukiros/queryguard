@@ -40,10 +40,16 @@ function useElapsed(running: boolean, startedAt: number | null): number | null {
  * run keeps the same nine rows, so runs can be compared at a glance; a stage
  * that could not happen on this path says "skipped" instead of disappearing.
  */
-export function PipelineTimeline({ rows, replayed, running, startedAt, result }: {
+/** No first event after this long means the server is still starting (a cold serverless instance). */
+export const SLOW_START_MS = 1500;
+
+export function PipelineTimeline({ rows, replayed, running, startedAt, result, awaitingFirstEvent = false }: {
   rows: TimelineRow[]; replayed: "cache" | "history" | null; running: boolean; startedAt: number | null; result: QueryResult | null;
+  /** Running, and not one event has arrived yet. */
+  awaitingFirstEvent?: boolean;
 }) {
   const live = useElapsed(running, startedAt);
+  const starting = awaitingFirstEvent && live !== null && live >= SLOW_START_MS;
   const verdict = headline(rows, result);
   const total = rows.find((r) => r.stage === "done")?.event?.elapsed_ms;
 
@@ -59,6 +65,11 @@ export function PipelineTimeline({ rows, replayed, running, startedAt, result }:
 
   return (
     <Panel id="timeline" title="Pipeline" aside={aside} className="border-line-strong">
+      {starting && (
+        <p className="mb-2 rounded-md bg-accent-soft px-2.5 py-1.5 text-[12.5px] text-ink-2" data-testid="starting-server" role="status">
+          Starting the server… the first question after a quiet spell takes about 5 seconds.
+        </p>
+      )}
       <ol className="relative" data-testid="timeline" aria-live="polite">
         {rows.map((row, i) => (
           <li key={row.stage} data-stage={row.stage} data-state={row.state}

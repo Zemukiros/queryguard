@@ -30,8 +30,6 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Union
 
-import numpy as np
-import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field
 
 from queryguard.generate import Interpretation
@@ -148,6 +146,13 @@ class ConfidencePayload(Out):
     scorer_version: str
 
 
+Mode = Literal["live", "demo"]
+# Why a question ran in demo mode: a demo-only deployment (QUERYGUARD_FAKE_LLM=1),
+# live answers switched off (QUERYGUARD_LIVE=0), today's spend ceiling, today's
+# cap on LLM calls, or the model API unusable (no key, or the key was refused).
+ModeReason = Literal["demo_deployment", "switched_off", "budget", "call_cap", "model_unavailable"]
+
+
 class QueryResult(Out):
     """Everything a question produced. The `done` payload, and the body of POST /v1/query."""
 
@@ -159,6 +164,10 @@ class QueryResult(Out):
     sql_source: Literal["model", "user", "reading"] = Field(
         "model", description="user: SQL supplied to /v1/run; reading: a clarification's reading, run via /v1/run."
     )
+    mode: Mode = Field(
+        "live", description="demo: a simulated model answered (llm/fake.py) and nothing was spent."
+    )
+    mode_reason: ModeReason | None = Field(None, description="Why it ran in demo mode; None when live.")
 
     sql: str | None = Field(None, description="The SQL the model wrote.")
     executed_sql: str | None = Field(None, description="What ran: the guardrail may have added a LIMIT.")
@@ -249,6 +258,11 @@ def json_cell(value: Any) -> Any:
     Intervals become their text form ("3 days 04:00:00"), not a bare number of
     seconds, so the unit is never lost. Arrays (array_agg) recurse.
     """
+    # Imported here, not at module load: the API's startup and /healthz never
+    # need them, and by the time a row exists the executor has loaded both.
+    import numpy as np
+    import pandas as pd
+
     if isinstance(value, list | tuple):
         return [json_cell(v) for v in value]
     if value is None or value is pd.NaT:

@@ -10,7 +10,14 @@
 \quit 1
 \endif
 
-CREATE ROLE queryguard_ro LOGIN PASSWORD :'ro_password';
+-- Every attribute is set here rather than by a later ALTER ROLE: managed
+-- Postgres (Neon) gives the owner CREATEROLE but not SUPERUSER, and only a
+-- superuser may name the SUPERUSER attribute in ALTER ROLE -- even to turn it
+-- off. CREATE ROLE checks only the attributes switched on, so this runs on
+-- both. The role can neither create databases/roles, inherit privileges, nor
+-- bypass row-level security. scripts/verify_db.py asserts all of it.
+CREATE ROLE queryguard_ro LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS
+    PASSWORD :'ro_password';
 
 -- Database level: connect, nothing else. (Also strips CREATE inherited via PUBLIC.)
 REVOKE ALL ON DATABASE :"DBNAME" FROM queryguard_ro;
@@ -48,9 +55,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE :"USER" IN SCHEMA public
     REVOKE USAGE, UPDATE ON SEQUENCES FROM queryguard_ro;
 ALTER DEFAULT PRIVILEGES FOR ROLE :"USER" IN SCHEMA public
     REVOKE EXECUTE ON FUNCTIONS FROM queryguard_ro;
-
--- The role can neither create databases/roles nor bypass RLS.
-ALTER ROLE queryguard_ro NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
 
 -- Belt and braces: every session this role opens starts read-only, so even a
 -- privilege misconfiguration cannot result in a write.

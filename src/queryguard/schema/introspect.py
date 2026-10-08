@@ -15,17 +15,25 @@ Usage:  uv run python -m queryguard.schema.introspect --refresh
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Engine, create_engine, inspect, text
-from sqlalchemy import types as sqltypes
-from sqlalchemy.exc import SQLAlchemyError
+from typing import TYPE_CHECKING
 
 from queryguard.config import database_url, schema_cache_path
+
+if TYPE_CHECKING:
+    from sqlalchemy import Engine
+
+# sqlalchemy is imported inside the functions that introspect. Reading the
+# models or the cached schema -- all the API does at runtime -- never loads it.
+
+logger = logging.getLogger(__name__)
 
 # Per-query ceiling for the profile pass. A wide or unindexed table must never
 # be able to hang a schema rebuild; a column that overruns is simply reported
@@ -206,6 +214,8 @@ def estimate_tokens(rendered: str) -> int:
 
 
 def _short_type(type_: Any, engine: Engine) -> str:
+    from sqlalchemy.exc import SQLAlchemyError
+
     try:
         compiled = type_.compile(engine.dialect)
     except SQLAlchemyError:
@@ -258,6 +268,9 @@ def _guarded(
     because it accepts a bind parameter, so no value is interpolated into SQL,
     and it resets itself when the transaction ends.
     """
+    from sqlalchemy import text
+    from sqlalchemy.exc import SQLAlchemyError
+
     try:
         conn.execute(
             text("SELECT set_config('statement_timeout', :ms, true)"),
@@ -272,6 +285,9 @@ def _guarded(
 
 
 def _guarded_scalars(conn: Any, statement: str, timeout_ms: int) -> list[Any]:
+    from sqlalchemy import text
+    from sqlalchemy.exc import SQLAlchemyError
+
     try:
         conn.execute(
             text("SELECT set_config('statement_timeout', :ms, true)"),
@@ -297,6 +313,8 @@ def _profile_column(
     Boolean is checked before Integer on purpose: the two overlap conceptually
     and getting the order wrong silently profiles every flag as a number.
     """
+    from sqlalchemy import types as sqltypes
+
     if isinstance(type_, sqltypes.Boolean):
         row = _guarded(
             conn,
@@ -372,6 +390,8 @@ def introspect_database(
     url: Any = None, *, timeout_ms: int = PROFILE_TIMEOUT_MS
 ) -> DatabaseSchema:
     """Read structure and profile every column. Uses the owner connection."""
+    from sqlalchemy import create_engine, inspect
+
     engine = create_engine(url or database_url())
     try:
         inspector = inspect(engine)
@@ -428,6 +448,17 @@ def introspect_database(
 # -------------------------------------------------------------------- cache
 
 
+def _introspection_url():
+    """The owner when DATABASE_URL is set, else the read-only role.
+
+    Introspection only reads the catalog and SELECTs, and the read-only role
+    produces an identical schema (column comments and profile included). A
+    deployment that never holds the owner's credentials -- Vercel -- builds
+    its cache, or rebuilds it at first use, with the URL it already has.
+    """
+    return database_url(readonly=not os.getenv("DATABASE_URL"))
+
+
 def save_schema(schema: DatabaseSchema, path: Path | None = None) -> Path:
     target = Path(path) if path else schema_cache_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -451,8 +482,13 @@ def load_schema(
             # A truncated or stale-format cache is a reason to rebuild, not to fail.
             pass
 
-    schema = introspect_database(timeout_ms=timeout_ms)
-    save_schema(schema, target)
+    schema = introspect_database(_introspection_url(), timeout_ms=timeout_ms)
+    try:
+        save_schema(schema, target)
+    except OSError as exc:
+        # A read-only filesystem (a serverless function whose build did not
+        # produce the cache) still answers; it just introspects per instance.
+        logger.warning("schema cache not written to %s (%s); using it in memory", target, exc)
     return schema
 
 
@@ -460,6 +496,8 @@ def load_schema(
 
 
 def main(argv: list[str] | None = None) -> int:
+    from sqlalchemy.exc import SQLAlchemyError
+
     parser = argparse.ArgumentParser(
         prog="python -m queryguard.schema.introspect",
         description="Introspect the database and print the compact prompt schema.",
