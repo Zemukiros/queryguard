@@ -45,7 +45,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from typing import Any
 
-import anthropic
 
 from queryguard.events import (
     AgreementPayload,
@@ -73,7 +72,13 @@ from queryguard.generate import (
     generate_sql_with_stats,
 )
 from queryguard.guardrails import GuardrailConfig, GuardrailResult, check
-from queryguard.llm.client import CallResult, LLMClient, RequestCapExceeded
+from queryguard.llm.client import (
+    MAX_CALLS_PER_QUESTION,
+    CallResult,
+    LLMClient,
+    RequestCapExceeded,
+    sdk_error_types,
+)
 from queryguard.schema.introspect import load_schema
 from queryguard.validation.agreement import AgreementResult, check_agreement, is_non_trivial
 from queryguard.validation.backtranslate import VALIDATION_MODEL, back_translate, judge_alignment
@@ -89,11 +94,10 @@ from queryguard.validation.confidence import (
 from queryguard.validation.sanity import SanityFlag, check_result
 
 
-# Generate, back-translate, judge, second SQL. One call per step, so a
-# question can only exceed this through a bug -- which is the point of the
-# check. Separate from the process-wide cap in llm/client.py, which bounds a
-# runaway loop across questions rather than the cost of any one of them.
-MAX_CALLS_PER_QUESTION = 4
+# MAX_CALLS_PER_QUESTION (llm/client.py): generate, back-translate, judge,
+# second SQL. One call per step, so a question can only exceed it through a
+# bug -- which is the point of the check. Defined beside the other call caps so
+# the API can read it without importing the pipeline.
 
 
 class QuestionBudgetExceeded(RuntimeError):
@@ -161,13 +165,17 @@ class PipelineResult:
 
 
 # A validation step that fails must not take the executed answer down with it.
-# These are the failures a step can have that are not bugs in this code.
-_VALIDATION_FAILURES = (
-    RequestCapExceeded,
-    QuestionBudgetExceeded,
-    anthropic.APIError,
-    ValueError,  # includes pydantic's ValidationError on a malformed response
-)
+# These are the failures a step can have that are not bugs in this code. A
+# function, not a tuple: `except` evaluates it only when something is raised,
+# so the SDK's error type is looked up without importing the SDK (see
+# llm.client.sdk_error_types).
+def _validation_failures() -> tuple[type[BaseException], ...]:
+    return (
+        RequestCapExceeded,
+        QuestionBudgetExceeded,
+        *sdk_error_types(),
+        ValueError,  # includes pydantic's ValidationError on a malformed response
+    )
 
 
 async def stream_question(
@@ -486,7 +494,7 @@ async def _validation_stages(
         calls.append(judge_call)
         alignment = judgement.alignment
         discrepancies = tuple(judgement.discrepancies)
-    except _VALIDATION_FAILURES as exc:
+    except _validation_failures() as exc:
         error = f"alignment: {type(exc).__name__}: {exc}"
         errors.append(error)
     result = replace(
@@ -518,7 +526,7 @@ async def _validation_stages(
                 ran=True, outcome=agreement.outcome, explanation=agreement.explanation,
                 second_sql=agreement.second_sql,
             )
-        except _VALIDATION_FAILURES as exc:
+        except _validation_failures() as exc:
             error = f"agreement: {type(exc).__name__}: {exc}"
             errors.append(error)
             payload = AgreementPayload(ran=True, error=error)

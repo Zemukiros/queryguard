@@ -27,6 +27,7 @@ import hashlib
 import json
 import logging
 import os
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -41,6 +42,9 @@ DEFAULT_MODEL = "claude-sonnet-5"
 
 # Runaway-loop guard. Override with QUERYGUARD_MAX_REQUESTS.
 DEFAULT_MAX_REQUESTS = 50
+
+# The most API calls one question may make (pipeline.py enforces it).
+MAX_CALLS_PER_QUESTION = 4
 
 # Cache multipliers apply to the model's *input* rate.
 CACHE_WRITE_MULTIPLIER = 1.25  # 5-minute TTL (a 1-hour TTL would be 2.0x)
@@ -69,6 +73,17 @@ PRICING: dict[str, ModelPricing] = {
     # _warn_if_cache_was_ignored() stays even though today's prefix is fine.
     "claude-haiku-4-5": ModelPricing(input_usd_per_mtok=1.00, output_usd_per_mtok=5.00),
 }
+
+
+def sdk_error_types() -> tuple[type[BaseException], ...]:
+    """(anthropic.APIError,) once the SDK is loaded, else ().
+
+    Callers that classify errors use this instead of importing anthropic, so a
+    process that never builds a real client (demo mode, /healthz) never pays
+    for the import. If the SDK was never loaded, none of its errors can occur.
+    """
+    sdk = sys.modules.get("anthropic")
+    return (sdk.APIError,) if sdk is not None else ()
 
 
 class RequestCapExceeded(RuntimeError):

@@ -30,8 +30,6 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Union
 
-import numpy as np
-import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field
 
 from queryguard.generate import Interpretation
@@ -260,6 +258,11 @@ def json_cell(value: Any) -> Any:
     Intervals become their text form ("3 days 04:00:00"), not a bare number of
     seconds, so the unit is never lost. Arrays (array_agg) recurse.
     """
+    # Imported here, not at module load: the API's startup and /healthz never
+    # need them, and by the time a row exists the executor has loaded both.
+    import numpy as np
+    import pandas as pd
+
     if isinstance(value, list | tuple):
         return [json_cell(v) for v in value]
     if value is None or value is pd.NaT:

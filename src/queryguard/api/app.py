@@ -46,7 +46,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
 
-import anthropic
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -55,10 +54,8 @@ from pydantic import BaseModel, Field, field_validator
 from queryguard.api.limits import seconds_until_utc_midnight
 from queryguard.api.settings import Settings
 from queryguard.events import ErrorPayload, Mode, ModeReason, Out, QueryResult, StageEvent
-from queryguard.llm.fake import DemoFakeSDK
-from queryguard.llm.client import DEFAULT_MODEL, LLMClient, RequestCapExceeded
+from queryguard.llm.client import DEFAULT_MODEL, MAX_CALLS_PER_QUESTION, LLMClient, RequestCapExceeded, sdk_error_types
 from queryguard.generate import Ambiguity, GeneratedSQL
-from queryguard.pipeline import MAX_CALLS_PER_QUESTION, QuestionBudgetExceeded, stream_answer, stream_question
 from queryguard.text import normalize_question, normalize_sql
 from queryguard.schema.introspect import DatabaseSchema, TableInfo, load_schema
 from queryguard.state import AppState, Reservation, make_state
@@ -77,8 +74,18 @@ MAX_HISTORY = 100
 # retry, and one with a validation error is missing a signal; neither is cached.
 _CACHEABLE = {"answered", "clarification", "cannot_answer", "blocked", "refused"}
 
-# Exceptions whose message is ours, written for the caller, and safe to return.
-_PUBLIC_MESSAGE = (RequestCapExceeded, QuestionBudgetExceeded)
+# Startup cost is a cold start on a serverless platform, so this module imports
+# nothing heavy at load time: the pipeline (pandas, sqlalchemy, sqlparse) loads
+# with the first question, the simulated model (yaml) with the first demo
+# answer, and the Anthropic SDK only when a real client is built. /healthz and
+# the OpenAPI schema need none of them. tests/test_platform.py holds that line.
+
+
+def _public_message(exc: BaseException | None) -> bool:
+    """Whether the exception's message is ours, written for the caller, and safe to return."""
+    from queryguard.pipeline import QuestionBudgetExceeded  # loaded already: an error came from a run
+
+    return isinstance(exc, (RequestCapExceeded, QuestionBudgetExceeded))
 
 
 # ------------------------------------------------------------------ bodies
@@ -226,9 +233,9 @@ def sse(event: StageEvent) -> str:
 def _public_error(event: StageEvent, query_id: str) -> ErrorResponse:
     payload: ErrorPayload = event.payload
     exc = event.exception
-    if isinstance(exc, _PUBLIC_MESSAGE):
+    if _public_message(exc):
         message = payload.message
-    elif isinstance(exc, anthropic.APIError):
+    elif isinstance(exc, sdk_error_types()):
         message = "the language model API request failed; try again shortly"
     else:
         message = "internal error; the details are in the server log"
@@ -238,9 +245,9 @@ def _public_error(event: StageEvent, query_id: str) -> ErrorResponse:
 
 
 def _error_status(exc: BaseException | None) -> int:
-    if isinstance(exc, _PUBLIC_MESSAGE):
+    if _public_message(exc):
         return 503
-    if isinstance(exc, anthropic.APIError):
+    if isinstance(exc, sdk_error_types()):
         return 502
     return 500
 
@@ -303,6 +310,8 @@ class _State:
             client_logger = logging.getLogger("queryguard.llm.client")
             if not any(isinstance(f, _DropCacheWarning) for f in client_logger.filters):
                 client_logger.addFilter(_DropCacheWarning())
+            from queryguard.llm.fake import DemoFakeSDK
+
             fake, guard = DemoFakeSDK(), self.store.demo_call_guard()
             self._demo = (LLMClient(sdk_client=fake, guard=guard),
                           LLMClient(sdk_client=fake, model=VALIDATION_MODEL, guard=guard))
@@ -432,6 +441,8 @@ def create_app(
         Demo mode runs the same pipeline on the simulated model. An `error`
         event comes out already made public (see _public_error).
         """
+        from queryguard.pipeline import stream_answer, stream_question
+
         client, key = admitted.client, admitted.key
         try:
             llm, validation_llm = state.clients() if admitted.mode == "live" else state.demo_clients()

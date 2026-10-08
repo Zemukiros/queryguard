@@ -136,3 +136,49 @@ def test_a_malformed_redis_url_names_the_variable_not_the_value(monkeypatch, val
 def test_a_quoted_redis_url_is_accepted(monkeypatch) -> None:
     monkeypatch.setenv("QUERYGUARD_REDIS_URL", ' "rediss://default:pw@example.upstash.io:6379" ')
     assert Settings.from_env().redis_url == "rediss://default:pw@example.upstash.io:6379"
+
+
+# ------------------------------------------------------------ cold start
+
+
+_PROBE = """
+import json, sys
+from fastapi.testclient import TestClient
+import asgi
+heavy = ["anthropic", "pandas", "numpy", "sqlalchemy", "psycopg", "sqlparse", "yaml"]
+loaded = {"import": [m for m in heavy if m in sys.modules]}
+client = TestClient(asgi.app)
+client.get("/healthz"); client.get("/openapi.json")
+loaded["healthz"] = [m for m in heavy if m in sys.modules]
+if sys.argv[1] == "ask":
+    done = client.post("/v1/query", json={"question": "How many orders were cancelled?"}).json()
+    loaded["answer"] = [m for m in heavy if m in sys.modules]
+    loaded["mode"] = done["mode"]
+print(json.dumps(loaded))
+"""
+
+
+def _probe(tmp_path, *args: str, **env: str) -> dict:
+    """Import the Vercel entrypoint in a fresh interpreter: this process has everything loaded already."""
+    import os
+    import subprocess
+    import sys as _sys
+
+    repo = Path(__file__).resolve().parent.parent
+    environment = {**os.environ, "QUERYGUARD_APP_DB": str(tmp_path / "app.db"), "PYTHONPATH": str(repo), **env}
+    out = subprocess.run([_sys.executable, "-c", _PROBE, *args], cwd=repo, env=environment,
+                         capture_output=True, text=True, check=True)
+    return json.loads(out.stdout.strip().splitlines()[-1])
+
+
+def test_startup_and_healthz_load_nothing_heavy(tmp_path) -> None:
+    """A cold start on Vercel pays for every import; /healthz and the schema need none of these."""
+    loaded = _probe(tmp_path, "health")
+    assert loaded["import"] == [] and loaded["healthz"] == []
+
+
+def test_a_demo_answer_never_loads_the_anthropic_sdk(tmp_path, live_database) -> None:
+    loaded = _probe(tmp_path, "ask", QUERYGUARD_FAKE_LLM="1", QUERYGUARD_FAKE_LLM_DELAY_MS="0")
+    assert loaded["mode"] == "demo"
+    assert "anthropic" not in loaded["answer"]
+    assert {"pandas", "sqlalchemy", "psycopg"} <= set(loaded["answer"]), "a demo answer still runs real SQL"

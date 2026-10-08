@@ -12,8 +12,12 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from typing import TYPE_CHECKING
+
 from dotenv import load_dotenv
-from sqlalchemy.engine import URL, make_url
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import URL
 
 
 def _find_repo_root() -> Path:
@@ -80,6 +84,8 @@ def database_url(*, readonly: bool = False) -> URL:
     raw = os.getenv(var)
     if not raw:
         raise RuntimeError(f"{var} is not set (expected in {REPO_ROOT / '.env'})")
+
+    from sqlalchemy.engine import make_url  # here, not at import: /healthz never needs it
 
     url = make_url(raw)
     # .env carries the bare `postgresql://` scheme, which SQLAlchemy maps to

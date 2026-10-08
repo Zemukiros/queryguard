@@ -34,8 +34,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import yaml
-
 from queryguard.config import REPO_ROOT
 
 if TYPE_CHECKING:
@@ -140,6 +138,8 @@ class AppState(ABC):
         golden.yaml. Nothing here is a golden case until that review.
         """
         import json
+
+        import yaml
 
         candidates = []
         for row in self.incorrect_feedback():
