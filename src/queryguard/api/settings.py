@@ -10,6 +10,12 @@ setting variables, never by editing code:
     QUERYGUARD_FRONTEND_ORIGIN       comma-separated CORS origins (http://localhost:3000)
     QUERYGUARD_APP_DB                SQLite file for history, feedback and cache (data/app.db)
     QUERYGUARD_TRUST_PROXY           1 = client IP from the last X-Forwarded-For hop (0)
+    QUERYGUARD_FAKE_LLM              1 = answer from llm/fake.py, never the API; $0 (0)
+
+Fake mode also points the LLM call log at logs/fake_llm_calls.jsonl (unless
+QUERYGUARD_LLM_LOG is set), so the real ledger -- and the spend ceiling read
+from it -- never sees fake calls, and lifts the process request cap, which
+exists to protect money that fake mode does not spend.
 
 The reserve is about twice the most expensive question in the live eval run
 ($0.0255), so questions already running cannot carry spend past the ceiling.
@@ -46,6 +52,7 @@ class Settings:
     frontend_origins: tuple[str, ...] = ("http://localhost:3000",)
     db_path: Path = field(default_factory=lambda: REPO_ROOT / "data" / "app.db")
     trust_proxy: bool = False
+    fake_llm: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -62,4 +69,5 @@ class Settings:
             # A relative path is relative to the repo, not to wherever the server was started.
             db_path=REPO_ROOT / _env("QUERYGUARD_APP_DB", "data/app.db"),
             trust_proxy=_env("QUERYGUARD_TRUST_PROXY", "0") == "1",
+            fake_llm=_env("QUERYGUARD_FAKE_LLM", "0") == "1",
         )

@@ -53,6 +53,7 @@ from queryguard.events import (
     ClarificationPayload,
     ColumnModel,
     ConfidencePayload,
+    Contribution,
     ErrorPayload,
     ExecutingPayload,
     GeneratingPayload,
@@ -76,7 +77,15 @@ from queryguard.llm.client import CallResult, LLMClient, RequestCapExceeded
 from queryguard.schema.introspect import load_schema
 from queryguard.validation.agreement import AgreementResult, check_agreement, is_non_trivial
 from queryguard.validation.backtranslate import VALIDATION_MODEL, back_translate, judge_alignment
-from queryguard.validation.confidence import SCORER_VERSION, Features, build_features, log_features, score
+from queryguard.validation.confidence import (
+    SCORER_VERSION,
+    Features,
+    band,
+    build_features,
+    contributions,
+    log_features,
+    score,
+)
 from queryguard.validation.sanity import SanityFlag, check_result
 
 
@@ -421,10 +430,12 @@ async def _answer_stages(
 
     run.stage = "confidence"
     result = await asyncio.to_thread(_scored, result)
+    terms = _contributions(result)
     yield run.event(
         ConfidencePayload(
-            confidence=result.confidence, breakdown=result.confidence_breakdown,
-            scorer_version=SCORER_VERSION,
+            confidence=result.confidence, band=band(result.confidence),
+            logit=sum(t.contribution for t in terms) if terms else None, contributions=terms,
+            breakdown=result.confidence_breakdown, scorer_version=SCORER_VERSION,
         )
     )
     yield run.done(result)
@@ -576,6 +587,10 @@ def _executing_payload(execution: ExecutionResult) -> ExecutingPayload:
     )
 
 
+def _contributions(result: PipelineResult) -> list[Contribution]:
+    return [Contribution(**term) for term in contributions(result.features)] if result.features else []
+
+
 def _flag_model(flag: SanityFlag) -> SanityFlagModel:
     return SanityFlagModel(
         check=flag.check, severity=flag.severity, explanation=flag.explanation, column=flag.column
@@ -614,6 +629,7 @@ def to_query_result(
     if execution is not None and execution.ok:
         rows = [[json_cell(v) for v in row] for row in execution.rows.itertuples(index=False, name=None)]
     agreement = outcome.agreement
+    terms = _contributions(outcome)
     return QueryResult(
         query_id=query_id, question=outcome.question, outcome=kind,
         sql=outcome.answer.sql, executed_sql=outcome.sql if outcome.guardrail.allowed else None,
@@ -621,6 +637,7 @@ def to_query_result(
         columns=execution.column_names if execution else [], rows=rows,
         row_count=execution.row_count if execution else 0,
         truncated=execution.truncated if execution else False,
+        execution_ms=execution.execution_ms if execution else None,
         guardrail_rule=outcome.guardrail.rule, guardrail_reason=outcome.guardrail.reason,
         execution_error=(execution.reason or execution.error_message) if execution and not execution.ok else None,
         sanity=[_flag_model(f) for f in outcome.sanity],
@@ -628,8 +645,12 @@ def to_query_result(
         discrepancies=list(outcome.discrepancies),
         agreement=agreement.outcome if agreement else None,
         agreement_explanation=agreement.explanation if agreement else None,
+        second_sql=agreement.second_sql if agreement else None,
         validation_errors=list(outcome.validation_errors),
-        confidence=outcome.confidence, confidence_breakdown=outcome.confidence_breakdown,
+        confidence=outcome.confidence,
+        confidence_band=band(outcome.confidence) if outcome.confidence is not None else None,
+        confidence_logit=sum(t.contribution for t in terms) if terms else None,
+        contributions=terms, confidence_breakdown=outcome.confidence_breakdown,
         scorer_version=SCORER_VERSION if outcome.confidence is not None else None,
         n_calls=(1 if outcome.call else 0) + len(outcome.validation_calls),
         cost_usd=outcome.cost_usd, elapsed_ms=elapsed_ms,

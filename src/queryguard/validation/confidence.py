@@ -186,6 +186,53 @@ def score(features: Features, weights: dict[str, float] | None = None) -> tuple[
     return 1.0 / (1.0 + math.exp(-logit)), breakdown
 
 
+# For people reading a score, not for fitting. Keys match V0_WEIGHTS.
+FEATURE_LABELS: dict[str, str] = {
+    "bias": "Baseline",
+    "self_confidence": "Model self-confidence",
+    "alignment_centered": "Back-translation alignment",
+    "alignment_missing": "Back-translation unavailable",
+    "discrepancy_count": "Judge discrepancies",
+    "sanity_fail": "Sanity failures",
+    "sanity_warn": "Sanity warnings",
+    "sanity_info": "Sanity notes",
+    "agreement_agree": "Second query agreed",
+    "agreement_disagree": "Second query disagreed",
+    "agreement_incomparable": "Second query incomparable",
+    "guardrail_rewrote": "Guardrail added a LIMIT",
+    "rows_empty": "Empty result",
+    "rows_capped": "Row cap reached",
+}
+
+# Score bands for display. 0.5 is the flag threshold the eval reports against
+# (docs/EVAL_RESULTS.md); 0.8 marks where the calibrated scores cluster high.
+BAND_HIGH = 0.8
+BAND_MEDIUM = 0.5
+
+
+def band(confidence: float) -> str:
+    if confidence >= BAND_HIGH:
+        return "high"
+    return "medium" if confidence >= BAND_MEDIUM else "low"
+
+
+def contributions(features: Features, weights: dict[str, float] | None = None) -> list[dict[str, Any]]:
+    """Every term of the logit -- bias first -- as {feature, label, value, weight, contribution}.
+
+    Unrounded, so the contributions sum to the logit. Empty for a query that
+    did not execute, matching score().
+    """
+    if not features.executed:
+        return []
+    weights = weights or WEIGHTS
+    terms = [("bias", 1.0)] + list(encode(features).items())
+    return [
+        {"feature": name, "label": FEATURE_LABELS[name], "value": value, "weight": weights[name],
+         "contribution": weights[name] * value}
+        for name, value in terms
+    ]
+
+
 # ----------------------------------------------------------------- the log
 
 

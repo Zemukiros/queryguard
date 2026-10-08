@@ -42,7 +42,8 @@ CREATE TABLE IF NOT EXISTS queries (
     cached      INTEGER NOT NULL,
     cost_usd    REAL NOT NULL,
     elapsed_ms  INTEGER NOT NULL,
-    result_json TEXT NOT NULL
+    result_json TEXT NOT NULL,
+    sql_source  TEXT NOT NULL DEFAULT 'model'
 );
 CREATE INDEX IF NOT EXISTS queries_by_client ON queries (client, created_at);
 CREATE TABLE IF NOT EXISTS feedback (
@@ -69,6 +70,10 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn, conn:
             conn.executescript(_SCHEMA)
+            # Databases created before sql_source existed.
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(queries)")}
+            if "sql_source" not in columns:
+                conn.execute("ALTER TABLE queries ADD COLUMN sql_source TEXT NOT NULL DEFAULT 'model'")
             conn.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('client_salt', ?)", (secrets.token_hex(16),)
             )
@@ -87,25 +92,34 @@ class Store:
 
     def record(
         self, *, query_id: str, client: str, question: str, outcome: str, confidence: float | None,
-        cached: bool, cost_usd: float, elapsed_ms: int, result: dict[str, Any],
+        cached: bool, cost_usd: float, elapsed_ms: int, result: dict[str, Any], sql_source: str = "model",
     ) -> None:
         with closing(self._connect()) as conn, conn:
             conn.execute(
-                "INSERT INTO queries VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                """INSERT INTO queries (query_id, created_at, client, question, outcome, confidence, cached,
+                                        cost_usd, elapsed_ms, result_json, sql_source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (query_id, _now(), client, question, outcome, confidence, int(cached), cost_usd,
-                 elapsed_ms, json.dumps(result, default=str)),
+                 elapsed_ms, json.dumps(result, default=str), sql_source),
             )
 
     def history(self, client: str, limit: int) -> list[dict[str, Any]]:
         with closing(self._connect()) as conn:
             rows = conn.execute(
                 """SELECT q.query_id, q.created_at, q.question, q.outcome, q.confidence, q.cached,
-                          q.cost_usd, f.correct, f.note, f.created_at AS feedback_at
+                          q.cost_usd, q.sql_source, f.correct, f.note, f.created_at AS feedback_at
                    FROM queries AS q LEFT JOIN feedback AS f USING (query_id)
                    WHERE q.client = ? ORDER BY q.created_at DESC LIMIT ?""",
                 (client, limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def get_result(self, query_id: str, client: str) -> dict[str, Any] | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT result_json FROM queries WHERE query_id = ? AND client = ?", (query_id, client)
+            ).fetchone()
+        return json.loads(row[0]) if row else None
 
     def exists(self, query_id: str) -> bool:
         with closing(self._connect()) as conn:

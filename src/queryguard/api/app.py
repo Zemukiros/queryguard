@@ -7,8 +7,11 @@ Endpoints (all bodies are Pydantic models, so /openapi.json is complete):
 
     POST /v1/query          QueryResult, after the whole pipeline has run
     POST /v1/query/stream   Server-Sent Events: `event: <stage>`, `data: <StageEvent JSON>`
+    POST /v1/run[/stream]   user-supplied SQL for a question, through the same guardrail, executor,
+                            validators, cache, rate limit and spend ceiling (events from `guardrails` on)
     GET  /v1/schema         the rendered prompt schema plus table/column metadata
     GET  /v1/history        the caller's recent questions, with outcome and confidence
+    GET  /v1/history/{id}   one of the caller's past results, to reopen it
     POST /v1/feedback       {query_id, correct, note}
     GET  /healthz           liveness, scorer version and today's spend
 
@@ -30,7 +33,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import unicodedata
+import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -46,8 +49,12 @@ from queryguard.api.limits import RateLimiter, SpendCeiling, seconds_until_utc_m
 from queryguard.api.settings import Settings
 from queryguard.api.store import Store
 from queryguard.events import ErrorPayload, QueryResult, StageEvent
+from queryguard.config import REPO_ROOT
+from queryguard.llm.fake import DemoFakeSDK
 from queryguard.llm.client import DEFAULT_MODEL, LLMClient, RequestCapExceeded
-from queryguard.pipeline import QuestionBudgetExceeded, stream_question
+from queryguard.generate import Ambiguity, GeneratedSQL
+from queryguard.pipeline import QuestionBudgetExceeded, stream_answer, stream_question
+from queryguard.text import normalize_question, normalize_sql
 from queryguard.schema.introspect import DatabaseSchema, TableInfo, load_schema
 from queryguard.validation.backtranslate import VALIDATION_MODEL
 from queryguard.validation.confidence import SCORER_VERSION
@@ -56,6 +63,8 @@ logger = logging.getLogger(__name__)
 
 API_VERSION = "0.1.0"
 MAX_QUESTION_CHARS = 500
+MAX_SQL_CHARS = 5000
+USER_SQL_SELF_CONFIDENCE = 0.5
 MAX_HISTORY = 100
 
 # Outcomes worth replaying for free. A failed or errored run might succeed on a
@@ -78,6 +87,21 @@ class QueryRequest(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("question is blank")
+        return value
+
+
+class RunRequest(BaseModel):
+    """SQL to run for a question: an edited query, or a clarification's chosen reading."""
+
+    question: str = Field(min_length=1, max_length=MAX_QUESTION_CHARS)
+    sql: str = Field(min_length=1, max_length=MAX_SQL_CHARS)
+
+    @field_validator("question", "sql")
+    @classmethod
+    def _not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
         return value
 
 
@@ -130,6 +154,7 @@ class HistoryItem(BaseModel):
     confidence: float | None
     cached: bool
     cost_usd: float
+    sql_source: str = Field(description="model, or user for /v1/run.")
     feedback: HistoryFeedback | None = None
 
 
@@ -142,16 +167,11 @@ class Health(BaseModel):
     status: str
     version: str
     scorer_version: str
+    fake_llm: bool = Field(description="True: answers come from llm/fake.py, not a model; nothing is spent.")
     budget: Budget
 
 
 # ------------------------------------------------------------------ helpers
-
-
-def normalize_question(question: str) -> str:
-    """Case, spacing and trailing punctuation do not change what is asked."""
-    text = unicodedata.normalize("NFKC", question).casefold()
-    return " ".join(text.split()).rstrip(" ?.!")
 
 
 def schema_hash(schema: DatabaseSchema) -> str:
@@ -159,10 +179,30 @@ def schema_hash(schema: DatabaseSchema) -> str:
     return hashlib.sha256(schema.model_dump_json(exclude={"extracted_at"}).encode()).hexdigest()
 
 
-def cache_key(question: str, schema: DatabaseSchema) -> str:
-    # The models and scorer are in the key: changing either changes the answer.
-    parts = (normalize_question(question), schema_hash(schema), DEFAULT_MODEL, VALIDATION_MODEL, SCORER_VERSION)
+def cache_key(question: str, schema: DatabaseSchema, sql: str | None = None) -> str:
+    """A generated answer is keyed on the question; a /v1/run answer on the question and its SQL.
+
+    The models and scorer are in the key: changing either changes the answer.
+    """
+    parts = ("query" if sql is None else "run", normalize_question(question), normalize_sql(sql or ""),
+             schema_hash(schema), DEFAULT_MODEL, VALIDATION_MODEL, SCORER_VERSION)
     return hashlib.sha256("\0".join(parts).encode()).hexdigest()
+
+
+def user_answer(sql: str) -> GeneratedSQL:
+    """User SQL as an answer, built without validation.
+
+    GeneratedSQL's validator rejects anything that does not start with SELECT,
+    which is right for model output but would turn a pasted DROP TABLE into a
+    422 -- hiding the guardrail rejection the user should see. The guardrail
+    and the read-only role are the gates; this only carries the text to them.
+    Self-confidence is a neutral 0.5 (the calibrated weight on it is 0).
+    """
+    return GeneratedSQL.model_construct(
+        sql=sql.strip(), explanation="SQL supplied by the user.", confidence=USER_SQL_SELF_CONFIDENCE,
+        tables_used=[], columns_used=[], assumptions=[],
+        ambiguity=Ambiguity(is_ambiguous=False, interpretations=[]),
+    )
 
 
 def sse(event: StageEvent) -> str:
@@ -192,6 +232,24 @@ def _error_status(exc: BaseException | None) -> int:
 
 
 # ---------------------------------------------------------------------- app
+
+
+class _DropCacheWarning(logging.Filter):
+    """The fake reports zero tokens, which LLMClient reads as an ignored cache marker."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "cache_control was set" not in record.getMessage()
+
+
+def _fake_clients() -> tuple[LLMClient, LLMClient]:
+    """Fake mode: see settings.py for why the log and cap move."""
+    os.environ.setdefault("QUERYGUARD_LLM_LOG", str(REPO_ROOT / "logs" / "fake_llm_calls.jsonl"))
+    os.environ.setdefault("QUERYGUARD_MAX_REQUESTS", str(10**9))
+    client_logger = logging.getLogger("queryguard.llm.client")
+    if not any(isinstance(f, _DropCacheWarning) for f in client_logger.filters):
+        client_logger.addFilter(_DropCacheWarning())
+    fake = DemoFakeSDK()
+    return LLMClient(sdk_client=fake), LLMClient(sdk_client=fake, model=VALIDATION_MODEL)
 
 
 class _State:
@@ -232,6 +290,8 @@ def create_app(
 ) -> FastAPI:
     """Build the app. Tests inject a schema and fake-backed clients; production passes nothing."""
     settings = settings or Settings.from_env()
+    if settings.fake_llm and client is None and validation_client is None:
+        client, validation_client = _fake_clients()
     state = _State(settings, schema, client, validation_client)
 
     app = FastAPI(
@@ -257,22 +317,18 @@ def create_app(
                 return forwarded.split(",")[-1].strip()
         return request.client.host if request.client else "unknown"
 
-    async def admit(body: QueryRequest, request: Request) -> tuple[str, str, QueryResult | None]:
+    async def admit(question: str, sql: str | None, request: Request) -> tuple[str, str, QueryResult | None]:
         """(client key, cache key, cached result or None). Raises 429/503 before any API call."""
         client = state.store.client_key(client_ip(request))
-        key = cache_key(body.question, await state.schema())
+        key = cache_key(question, await state.schema(), sql)
 
         cached = await asyncio.to_thread(state.store.cache_get, key)
         if cached is not None:
             result = QueryResult.model_validate(cached).model_copy(
-                update={"query_id": uuid.uuid4().hex, "cached": True, "question": body.question,
+                update={"query_id": uuid.uuid4().hex, "cached": True, "question": question,
                         "cost_usd": 0.0, "n_calls": 0, "elapsed_ms": 0}
             )
-            await asyncio.to_thread(
-                state.store.record, query_id=result.query_id, client=client, question=body.question,
-                outcome=result.outcome, confidence=result.confidence, cached=True, cost_usd=0.0,
-                elapsed_ms=0, result=result.model_dump(mode="json"),
-            )
+            await asyncio.to_thread(record, result, client)
             return client, key, result
 
         retry_after = state.limiter.hit(client)
@@ -294,27 +350,38 @@ def create_app(
             )
         return client, key, None
 
-    async def run(question: str, client: str, key: str, query_id: str) -> AsyncIterator[StageEvent]:
+    def record(result: QueryResult, client: str) -> None:
+        state.store.record(
+            query_id=result.query_id, client=client, question=result.question, outcome=result.outcome,
+            confidence=result.confidence, cached=result.cached, cost_usd=result.cost_usd,
+            elapsed_ms=result.elapsed_ms, sql_source=result.sql_source, result=result.model_dump(mode="json"),
+        )
+
+    async def run(question: str, sql: str | None, client: str, key: str, query_id: str) -> AsyncIterator[StageEvent]:
         """The pipeline's events, recorded and cached on the way out. Releases the spend reserve.
 
+        sql None: generate (stream_question). Otherwise run that SQL (stream_answer),
+        which is the same guardrail, executor and validators from `guardrails` on.
         An `error` event comes out already made public (see _public_error).
         """
         try:
             llm, validation_llm = state.clients()
-            async for event in stream_question(
-                question, client=llm, validation_client=validation_llm, schema=await state.schema(),
-                query_id=query_id,
-            ):
+            schema = await state.schema()
+            if sql is None:
+                stream = stream_question(question, client=llm, validation_client=validation_llm,
+                                         schema=schema, query_id=query_id)
+            else:
+                stream = stream_answer(question, user_answer(sql), client=llm,
+                                       validation_client=validation_llm, schema=schema, query_id=query_id)
+            async for event in stream:
                 if event.stage == "done":
                     result: QueryResult = event.payload
-                    dumped = result.model_dump(mode="json")
-                    await asyncio.to_thread(
-                        state.store.record, query_id=result.query_id, client=client, question=question,
-                        outcome=result.outcome, confidence=result.confidence, cached=False,
-                        cost_usd=result.cost_usd, elapsed_ms=result.elapsed_ms, result=dumped,
-                    )
+                    if sql is not None:
+                        result = result.model_copy(update={"sql_source": "user"})
+                        event.payload = result
+                    await asyncio.to_thread(record, result, client)
                     if result.outcome in _CACHEABLE and not result.validation_errors:
-                        await asyncio.to_thread(state.store.cache_put, key, dumped)
+                        await asyncio.to_thread(state.store.cache_put, key, result.model_dump(mode="json"))
                 elif event.stage == "error":
                     logger.error("query %s failed in %s", query_id, event.payload.failed_stage,
                                  exc_info=event.exception)
@@ -322,7 +389,8 @@ def create_app(
                     await asyncio.to_thread(
                         state.store.record, query_id=query_id, client=client, question=question,
                         outcome="error", confidence=None, cached=False, cost_usd=0.0,
-                        elapsed_ms=event.elapsed_ms, result=error.model_dump(),
+                        elapsed_ms=event.elapsed_ms, sql_source="model" if sql is None else "user",
+                        result=error.model_dump(),
                     )
                     public = StageEvent(
                         elapsed_ms=event.elapsed_ms, duration_ms=event.duration_ms,
@@ -335,20 +403,12 @@ def create_app(
         finally:
             state.ceiling.release()
 
-    # ------------------------------------------------------------- routes
-
-    @app.post(
-        "/v1/query",
-        response_model=QueryResult,
-        responses={429: {"model": Detail}, 500: {"model": ErrorResponse}, 502: {"model": ErrorResponse},
-                   503: {"model": ErrorResponse}},
-    )
-    async def query(body: QueryRequest, request: Request) -> Any:
-        client, key, cached = await admit(body, request)
+    async def answer_json(question: str, sql: str | None, request: Request) -> Any:
+        client, key, cached = await admit(question, sql, request)
         if cached is not None:
             return cached
         query_id = uuid.uuid4().hex
-        async for event in run(body.question, client, key, query_id):
+        async for event in run(question, sql, client, key, query_id):
             if event.stage == "done":
                 return event.payload
             if event.stage == "error":
@@ -358,30 +418,49 @@ def create_app(
                 return JSONResponse(error.model_dump(), status_code=_error_status(event.exception))
         raise HTTPException(500, detail="pipeline ended without a result")
 
-    @app.post(
-        "/v1/query/stream",
-        response_class=StreamingResponse,
-        responses={
-            200: {"description": "text/event-stream. Each event's data is a StageEvent; the last is "
-                                 "`done` (payload: QueryResult) or `error` (payload: ErrorPayload).",
-                  "model": StageEvent},
-            429: {"model": Detail}, 503: {"model": Detail},
-        },
-    )
-    async def query_stream(body: QueryRequest, request: Request) -> StreamingResponse:
-        client, key, cached = await admit(body, request)
+    async def answer_stream(question: str, sql: str | None, request: Request) -> StreamingResponse:
+        client, key, cached = await admit(question, sql, request)
 
         async def events() -> AsyncIterator[str]:
             if cached is not None:
                 yield sse(StageEvent(elapsed_ms=0, duration_ms=0, payload=cached))
                 return
-            async for event in run(body.question, client, key, uuid.uuid4().hex):
+            async for event in run(question, sql, client, key, uuid.uuid4().hex):
                 yield sse(event)
 
         return StreamingResponse(
             events(), media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    # ------------------------------------------------------------- routes
+
+    json_errors = {429: {"model": Detail}, 500: {"model": ErrorResponse}, 502: {"model": ErrorResponse},
+                   503: {"model": ErrorResponse}}
+    stream_responses = {
+        200: {"description": "text/event-stream. Each event's data is a StageEvent; the last is "
+                             "`done` (payload: QueryResult) or `error` (payload: ErrorPayload).",
+              "model": StageEvent},
+        429: {"model": Detail}, 503: {"model": Detail},
+    }
+
+    @app.post("/v1/query", response_model=QueryResult, responses=json_errors)
+    async def query(body: QueryRequest, request: Request) -> Any:
+        return await answer_json(body.question, None, request)
+
+    @app.post("/v1/query/stream", response_class=StreamingResponse, responses=stream_responses)
+    async def query_stream(body: QueryRequest, request: Request) -> StreamingResponse:
+        return await answer_stream(body.question, None, request)
+
+    @app.post("/v1/run", response_model=QueryResult, responses=json_errors,
+              summary="Run user-supplied SQL for a question, through the same checks")
+    async def run_sql(body: RunRequest, request: Request) -> Any:
+        return await answer_json(body.question, body.sql, request)
+
+    @app.post("/v1/run/stream", response_class=StreamingResponse, responses=stream_responses,
+              summary="Stream user-supplied SQL through the same checks (from `guardrails` on)")
+    async def run_sql_stream(body: RunRequest, request: Request) -> StreamingResponse:
+        return await answer_stream(body.question, body.sql, request)
 
     @app.get("/v1/schema", response_model=SchemaResponse)
     async def get_schema() -> SchemaResponse:
@@ -398,12 +477,22 @@ def create_app(
             HistoryItem(
                 query_id=r["query_id"], created_at=r["created_at"], question=r["question"],
                 outcome=r["outcome"], confidence=r["confidence"], cached=bool(r["cached"]),
-                cost_usd=r["cost_usd"],
+                cost_usd=r["cost_usd"], sql_source=r["sql_source"],
                 feedback=None if r["correct"] is None else HistoryFeedback(
                     correct=bool(r["correct"]), note=r["note"], created_at=r["feedback_at"]),
             )
             for r in rows
         ]
+
+    @app.get("/v1/history/{query_id}", response_model=QueryResult, responses={404: {"model": Detail}})
+    async def history_item(query_id: str, request: Request) -> Any:
+        """A past result of the caller's, to reopen it. Failed questions have none."""
+        result = await asyncio.to_thread(
+            state.store.get_result, query_id, state.store.client_key(client_ip(request))
+        )
+        if result is None or result.get("stage") != "done":
+            raise HTTPException(404, detail=f"no result for query {query_id!r}")
+        return result
 
     @app.post("/v1/feedback", response_model=FeedbackResponse, responses={404: {"model": Detail}})
     async def feedback(body: FeedbackRequest) -> FeedbackResponse:
@@ -416,7 +505,7 @@ def create_app(
     async def healthz() -> Health:
         spent = await asyncio.to_thread(spent_today_usd)
         return Health(
-            status="ok", version=API_VERSION, scorer_version=SCORER_VERSION,
+            status="ok", version=API_VERSION, scorer_version=SCORER_VERSION, fake_llm=settings.fake_llm,
             budget=Budget(spent_today_usd=round(spent, 6), daily_ceiling_usd=settings.daily_spend_usd),
         )
 

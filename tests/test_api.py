@@ -273,3 +273,115 @@ def test_cors_allows_only_the_configured_origin(tmp_path) -> None:
     other = client.options("/v1/query", headers={"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"})
     assert allowed.headers.get("access-control-allow-origin") == "https://demo.example"
     assert "access-control-allow-origin" not in other.headers
+
+
+# --------------------------------------------------------------- run my SQL
+
+
+def _run_stream(client: TestClient, question: str, sql: str):
+    return client.post("/v1/run/stream", json={"question": question, "sql": sql})
+
+
+def test_pasted_drop_table_is_a_named_guardrail_rejection(tmp_path) -> None:
+    client, fake = _client(tmp_path, _ambiguous_answer())
+    events = _events(_run_stream(client, "Clean up", "DROP TABLE orders;"))
+
+    assert [stage for stage, _ in events] == ["guardrails", "confidence", "done"]
+    guardrails = events[0][1]["payload"]
+    assert guardrails["allowed"] is False and guardrails["rule"] == "statement_type"
+    assert "DROP" in guardrails["reason"]
+    done = events[-1][1]["payload"]
+    assert done["outcome"] == "blocked" and done["sql_source"] == "user"
+    assert done["guardrail_rule"] == "statement_type" and done["executed_sql"] is None
+    assert fake.calls == []  # nothing validated, nothing generated
+
+    body = client.post("/v1/run", json={"question": "Clean up", "sql": "DROP TABLE orders"}).json()
+    assert body["outcome"] == "blocked" and body["cached"] is True  # same question + SQL, normalised
+
+
+def test_user_sql_runs_through_every_check(tmp_path, live_database) -> None:
+    client, fake = _client(tmp_path, _answer(COUNT_SQL))
+    events = _events(_run_stream(client, "How many orders were cancelled?", COUNT_SQL))
+
+    assert [stage for stage, _ in events] == [
+        "guardrails", "executing", "sanity", "backtranslate", "agreement", "confidence", "done",
+    ]
+    done = events[-1][1]["payload"]
+    assert done["outcome"] == "answered" and done["sql_source"] == "user"
+    assert done["n_calls"] == len(fake.calls) == 3  # back-translate, judge, second query: no generation
+    assert done["second_sql"] and done["execution_ms"] is not None
+
+    [item] = client.get("/v1/history").json()
+    assert item["sql_source"] == "user"
+    reopened = client.get(f"/v1/history/{done['query_id']}").json()
+    assert reopened["rows"] == done["rows"] and reopened["sql_source"] == "user"
+
+
+def test_run_requests_get_the_same_rate_limit_and_ceiling(tmp_path) -> None:
+    client, fake = _client(tmp_path, _ambiguous_answer(), rate_per_minute=1)
+    assert client.post("/v1/run", json={"question": "q", "sql": "DROP TABLE a"}).status_code == 200
+    assert client.post("/v1/run", json={"question": "q", "sql": "DROP TABLE b"}).status_code == 429
+
+    _spend_today(5.0)
+    client, fake = _client(tmp_path / "other", _answer(COUNT_SQL))
+    for endpoint in ("/v1/run", "/v1/run/stream"):
+        assert client.post(endpoint, json={"question": "q", "sql": COUNT_SQL}).status_code == 503
+    assert fake.calls == []
+
+
+def test_run_request_validation(tmp_path) -> None:
+    client, _ = _client(tmp_path, _ambiguous_answer())
+    assert client.post("/v1/run", json={"question": "q", "sql": "  "}).status_code == 422
+    assert client.post("/v1/run", json={"question": "q", "sql": "x" * 5001}).status_code == 422
+
+
+def test_reopening_is_scoped_to_the_caller(tmp_path) -> None:
+    client, _ = _client(tmp_path, _ambiguous_answer(), trust_proxy=True)
+    qid = client.post("/v1/query", json={"question": "What was revenue?"},
+                      headers={"x-forwarded-for": "1.1.1.1"}).json()["query_id"]
+    assert client.get(f"/v1/history/{qid}", headers={"x-forwarded-for": "1.1.1.1"}).status_code == 200
+    assert client.get(f"/v1/history/{qid}", headers={"x-forwarded-for": "2.2.2.2"}).status_code == 404
+
+
+def test_an_old_database_gains_the_sql_source_column(tmp_path) -> None:
+    import sqlite3
+
+    from queryguard.api.store import Store
+
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute("""CREATE TABLE queries (query_id TEXT PRIMARY KEY, created_at TEXT NOT NULL,
+            client TEXT NOT NULL, question TEXT NOT NULL, outcome TEXT NOT NULL, confidence REAL,
+            cached INTEGER NOT NULL, cost_usd REAL NOT NULL, elapsed_ms INTEGER NOT NULL,
+            result_json TEXT NOT NULL)""")
+        conn.execute("INSERT INTO queries VALUES ('a', 'now', 'c', 'q', 'answered', 0.9, 0, 0, 1, '{}')")
+    store = Store(path)
+    assert store.history("c", 5)[0]["sql_source"] == "model"
+
+
+# ------------------------------------------------------ confidence explained
+
+
+def test_contributions_explain_the_score(tmp_path, live_database) -> None:
+    import math
+
+    client, _ = _client(tmp_path, _answer(COUNT_SQL))
+    events = dict(_events(_stream(client, "How many orders were cancelled?")))
+    payload = events["confidence"]["payload"]
+
+    terms = payload["contributions"]
+    assert terms[0]["feature"] == "bias" and all(t["label"] for t in terms)
+    for t in terms:
+        assert t["contribution"] == pytest.approx(t["weight"] * t["value"])
+    assert sum(t["contribution"] for t in terms) == pytest.approx(payload["logit"])
+    assert 1 / (1 + math.exp(-payload["logit"])) == pytest.approx(payload["confidence"], abs=1e-3)
+    assert payload["band"] in {"high", "medium", "low"}
+    done = events["done"]["payload"]
+    assert done["contributions"] == terms and done["confidence_band"] == payload["band"]
+
+
+def test_a_blocked_query_has_no_contributions(tmp_path) -> None:
+    client, _ = _client(tmp_path, _answer("SELECT 1; DELETE FROM orders"))
+    payload = dict(_events(_stream(client, "x")))["confidence"]["payload"]
+    assert payload["confidence"] == 0.0 and payload["band"] == "low"
+    assert payload["contributions"] == [] and payload["logit"] is None

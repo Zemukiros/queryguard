@@ -119,9 +119,25 @@ class AgreementPayload(BaseModel):
     error: str | None = None
 
 
+class Contribution(BaseModel):
+    """One term of the confidence logit: weight x value. The terms sum to `logit`."""
+
+    feature: str
+    label: str
+    value: float
+    weight: float
+    contribution: float
+
+
+Band = Literal["high", "medium", "low"]
+
+
 class ConfidencePayload(BaseModel):
     stage: Literal["confidence"] = "confidence"
     confidence: float
+    band: Band
+    logit: float | None = Field(None, description="None when nothing executed (the score is then 0).")
+    contributions: list[Contribution] = Field(default_factory=list)
     breakdown: dict[str, float]
     scorer_version: str
 
@@ -134,6 +150,7 @@ class QueryResult(BaseModel):
     question: str
     outcome: Outcome
     cached: bool = False
+    sql_source: Literal["model", "user"] = Field("model", description="user: SQL supplied to /v1/run.")
 
     sql: str | None = Field(None, description="The SQL the model wrote.")
     executed_sql: str | None = Field(None, description="What ran: the guardrail may have added a LIMIT.")
@@ -144,6 +161,7 @@ class QueryResult(BaseModel):
     rows: list[list[Any]] = Field(default_factory=list, description="JSON-safe cells, in column order.")
     row_count: int = 0
     truncated: bool = False
+    execution_ms: int | None = None
 
     guardrail_rule: str | None = None
     guardrail_reason: str | None = None
@@ -155,9 +173,13 @@ class QueryResult(BaseModel):
     discrepancies: list[str] = Field(default_factory=list)
     agreement: Literal["agree", "disagree", "incomparable"] | None = None
     agreement_explanation: str | None = None
+    second_sql: str | None = Field(None, description="The independently written query agreement compared.")
     validation_errors: list[str] = Field(default_factory=list)
 
     confidence: float | None = None
+    confidence_band: Band | None = None
+    confidence_logit: float | None = None
+    contributions: list[Contribution] = Field(default_factory=list)
     confidence_breakdown: dict[str, float] = Field(default_factory=dict)
     scorer_version: str | None = None
 
