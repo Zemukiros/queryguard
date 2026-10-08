@@ -94,7 +94,7 @@ def test_fake_mode_clarification_then_a_reading_runs(client, live_database) -> N
 
 def test_fake_mode_refuses_unknown_questions(client) -> None:
     done = client.post("/v1/query", json={"question": "What is the meaning of life?"}).json()
-    assert done["outcome"] == "cannot_answer" and "golden-set" in done["cannot_answer_reason"]
+    assert done["outcome"] == "cannot_answer" and "eval set" in done["cannot_answer_reason"]
 
 
 def test_fake_mode_moves_the_log_and_lifts_the_cap(tmp_path, monkeypatch) -> None:
@@ -106,3 +106,30 @@ def test_fake_mode_moves_the_log_and_lifts_the_cap(tmp_path, monkeypatch) -> Non
     assert log_path().name == "fake_llm_calls.jsonl"
     assert max_requests() > 10**6
     assert client.get("/healthz").json()["budget"]["spent_today_usd"] == 0.0
+
+
+def test_edited_sql_that_answers_another_question_meets_disagreement(client, live_database) -> None:
+    """The simulated second query is the reference SQL, so wrong user SQL is not waved through."""
+    done = client.post("/v1/run", json={
+        "question": "How many orders were placed in 2025?",
+        "sql": "SELECT o.status, count(*) FROM orders AS o GROUP BY o.status",
+    }).json()
+    assert done["outcome"] == "answered"
+    assert done["agreement"] in {"disagree", "incomparable"} and done["alignment"] < 0.7
+    assert done["confidence"] < 0.5
+
+
+def test_unknown_questions_get_an_incomparable_second_query(client, live_database) -> None:
+    done = client.post("/v1/run", json={"question": "Something new", "sql": "SELECT count(*) FROM orders"}).json()
+    assert done["agreement"] == "incomparable"
+    assert "fake" not in json.dumps(done).lower()
+
+
+def test_a_reading_run_is_labelled_as_a_reading(client, live_database) -> None:
+    sql = fake.READINGS["ambig_02"][1][1]
+    body = {"question": "Who are our top 10 customers?", "sql": sql, "source": "reading"}
+    done = client.post("/v1/run", json=body).json()
+    assert done["sql_source"] == "reading" and done["agreement"] == "agree"
+    again = client.post("/v1/run", json={**body, "source": "user"}).json()
+    assert again["cached"] is True and again["sql_source"] == "user"
+    assert [i["sql_source"] for i in client.get("/v1/history").json()] == ["user", "reading"]

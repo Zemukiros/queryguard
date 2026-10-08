@@ -10,9 +10,12 @@ calls are canned:
 - generate: a golden question gets its golden SQL; an ambiguous one gets the
   hand-written readings below, every one of them runnable; an unanswerable one,
   or any question not in the golden set, gets a refusal that says so.
-- second query: echoes the first, so agreement is "agree".
+- second query: the golden SQL when the question has one, so an edited query
+  that answers something else is shown disagreeing; the same reading for an
+  ambiguous question (it is told to pick the reading the wording supports);
+  otherwise it declines, which agreement reports as incomparable.
 - back-translation: a golden SQL maps back to its golden question; any other
-  SQL (a user's edit) gets a generic description.
+  SQL (a user's edit) is reported as untranslatable in demo mode.
 - judge: 1.0 when the back-translation is the question asked, else 0.4 with a
   discrepancy -- enough to show the verification UI both ways.
 
@@ -43,8 +46,8 @@ from queryguard.validation.backtranslate import AlignmentJudgement, BackTranslat
 GOLDEN_YAML = REPO_ROOT / "evals" / "golden.yaml"
 DEFAULT_DELAY_MS = 250
 NOT_IN_GOLDEN = (
-    "Fake LLM mode only answers the golden-set questions (evals/golden.yaml). "
-    "Try one of the example questions, or edit the SQL and run it yourself."
+    "Demo mode simulates the model, and the simulation only knows the eval set's questions "
+    "(evals/golden.yaml). Try an example question, or write SQL and run it yourself."
 )
 
 _PAID = "o.status IN ('paid', 'shipped', 'delivered', 'refunded')"
@@ -171,7 +174,7 @@ def _golden() -> tuple[dict[str, dict], dict[str, str]]:
 def _answer(sql: str, explanation: str, confidence: float = 0.9, *, interpretations=None) -> GeneratedSQL:
     return GeneratedSQL(
         sql=sql, explanation=explanation, confidence=confidence, tables_used=[], columns_used=[],
-        assumptions=[] if sql or interpretations else ["fake LLM: not a golden-set question"],
+        assumptions=[],
         ambiguity=Ambiguity(is_ambiguous=bool(interpretations), interpretations=interpretations or []),
     )
 
@@ -181,21 +184,30 @@ def generate(question: str) -> GeneratedSQL:
     if entry is None:
         return _answer("", NOT_IN_GOLDEN, 0.0)
     if entry["id"] in READINGS:
-        return _answer("", "Fake LLM: this golden question is ambiguous.", 0.4, interpretations=[
+        return _answer("", "Simulated model: this question has more than one reading.", 0.4, interpretations=[
             Interpretation(label=label, sql=sql, explanation=why) for label, sql, why in READINGS[entry["id"]]
         ])
     if "golden_sql" in entry:
-        return _answer(entry["golden_sql"].strip(), f"Fake LLM: the golden SQL for {entry['id']}.")
-    return _answer("", f"Fake LLM: {entry['id']} is unanswerable from this schema. {entry.get('notes', '')}".strip(), 0.0)
+        return _answer(entry["golden_sql"].strip(), f"Simulated model: the eval set's reference SQL for {entry['id']}.")
+    return _answer("", f"Simulated model: this question cannot be answered from this schema. {entry.get('notes', '')}".strip(), 0.0)
+
+
+def second_query(question: str, first_sql: str) -> GeneratedSQL:
+    entry = _golden()[0].get(normalize_question(question))
+    if entry is not None and "golden_sql" in entry:
+        return _answer(entry["golden_sql"].strip(), "Simulated second query: the eval set's reference SQL.")
+    if entry is not None and entry["id"] in READINGS:
+        return _answer(first_sql, "Simulated second query: the same reading of an ambiguous question.")
+    return _answer("", "Simulated second query: declined, the simulation does not know this question.", 0.0)
 
 
 def back_translate(sql: str) -> BackTranslation:
     question = _golden()[1].get(normalize_sql(sql))
     if question is not None:
-        return BackTranslation(question=question, details=["fake LLM: matched a golden SQL"])
+        return BackTranslation(question=question, details=["simulated: matched the eval set's reference SQL"])
     return BackTranslation(
-        question="What does this query return? (fake back-translation of SQL outside the golden set)",
-        details=["fake LLM: no golden SQL matched"],
+        question="(Demo mode can only back-translate the eval set's reference SQL, so this query is unmatched.)",
+        details=["simulated: no reference SQL matched"],
     )
 
 
@@ -203,7 +215,7 @@ def judge(original: str, back_translated: str) -> AlignmentJudgement:
     if normalize_question(original) == normalize_question(back_translated):
         return AlignmentJudgement(alignment=1.0, discrepancies=[])
     return AlignmentJudgement(
-        alignment=0.4, discrepancies=["fake judge: this SQL is not the golden answer to the question asked"]
+        alignment=0.4, discrepancies=["Simulated judge: this SQL is not the reference answer to the question asked."]
     )
 
 
@@ -226,8 +238,8 @@ class DemoFakeSDK:
             back = content.split("\n\nBACK-TRANSLATED: ", 1)[1].split("\n", 1)[0]
             parsed = judge(original, back)
         elif "\nEarlier query:\n" in content:
-            first_sql = content.split("\nEarlier query:\n", 1)[1]
-            parsed = _answer(first_sql, "Fake LLM: the second query echoes the first.")
+            question = content.removeprefix("Q: ").split("\n\n", 1)[0]
+            parsed = second_query(question, content.split("\nEarlier query:\n", 1)[1])
         else:
             parsed = generate(content.removeprefix("Q: "))
         self.calls += 1

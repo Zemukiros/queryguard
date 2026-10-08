@@ -32,9 +32,15 @@ from typing import Annotated, Any, Literal, Union
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, Field, PrivateAttr, computed_field
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field
 
 from queryguard.generate import Interpretation
+
+class Out(BaseModel):
+    """A response model. Fields with defaults are always sent, so the schema marks them required."""
+
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
 
 Stage = Literal[
     "generating", "clarification", "guardrails", "executing", "sanity",
@@ -44,7 +50,7 @@ Stage = Literal[
 Outcome = Literal["answered", "clarification", "cannot_answer", "blocked", "refused", "failed"]
 
 
-class GeneratingPayload(BaseModel):
+class GeneratingPayload(Out):
     stage: Literal["generating"] = "generating"
     kind: Literal["sql", "clarification", "cannot_answer"]
     sql: str | None = None
@@ -56,12 +62,12 @@ class GeneratingPayload(BaseModel):
     latency_ms: int
 
 
-class ClarificationPayload(BaseModel):
+class ClarificationPayload(Out):
     stage: Literal["clarification"] = "clarification"
     interpretations: list[Interpretation]
 
 
-class GuardrailsPayload(BaseModel):
+class GuardrailsPayload(Out):
     stage: Literal["guardrails"] = "guardrails"
     allowed: bool
     rule: str | None = None
@@ -70,12 +76,12 @@ class GuardrailsPayload(BaseModel):
     sql_to_execute: str | None = None
 
 
-class ColumnModel(BaseModel):
+class ColumnModel(Out):
     name: str
     dtype: str
 
 
-class ExecutingPayload(BaseModel):
+class ExecutingPayload(Out):
     stage: Literal["executing"] = "executing"
     outcome: Literal["ok", "refused", "failed"]
     row_count: int
@@ -89,19 +95,19 @@ class ExecutingPayload(BaseModel):
     sqlstate: str | None = None
 
 
-class SanityFlagModel(BaseModel):
+class SanityFlagModel(Out):
     check: str
     severity: Literal["fail", "warn", "info"]
     explanation: str
     column: str | None = None
 
 
-class SanityPayload(BaseModel):
+class SanityPayload(Out):
     stage: Literal["sanity"] = "sanity"
     flags: list[SanityFlagModel]
 
 
-class BacktranslatePayload(BaseModel):
+class BacktranslatePayload(Out):
     stage: Literal["backtranslate"] = "backtranslate"
     back_translation: str | None = None
     alignment: float | None = None
@@ -109,7 +115,7 @@ class BacktranslatePayload(BaseModel):
     error: str | None = None
 
 
-class AgreementPayload(BaseModel):
+class AgreementPayload(Out):
     stage: Literal["agreement"] = "agreement"
     ran: bool
     outcome: Literal["agree", "disagree", "incomparable"] | None = None
@@ -119,7 +125,7 @@ class AgreementPayload(BaseModel):
     error: str | None = None
 
 
-class Contribution(BaseModel):
+class Contribution(Out):
     """One term of the confidence logit: weight x value. The terms sum to `logit`."""
 
     feature: str
@@ -132,7 +138,7 @@ class Contribution(BaseModel):
 Band = Literal["high", "medium", "low"]
 
 
-class ConfidencePayload(BaseModel):
+class ConfidencePayload(Out):
     stage: Literal["confidence"] = "confidence"
     confidence: float
     band: Band
@@ -142,7 +148,7 @@ class ConfidencePayload(BaseModel):
     scorer_version: str
 
 
-class QueryResult(BaseModel):
+class QueryResult(Out):
     """Everything a question produced. The `done` payload, and the body of POST /v1/query."""
 
     stage: Literal["done"] = "done"
@@ -150,7 +156,9 @@ class QueryResult(BaseModel):
     question: str
     outcome: Outcome
     cached: bool = False
-    sql_source: Literal["model", "user"] = Field("model", description="user: SQL supplied to /v1/run.")
+    sql_source: Literal["model", "user", "reading"] = Field(
+        "model", description="user: SQL supplied to /v1/run; reading: a clarification's reading, run via /v1/run."
+    )
 
     sql: str | None = Field(None, description="The SQL the model wrote.")
     executed_sql: str | None = Field(None, description="What ran: the guardrail may have added a LIMIT.")
@@ -191,7 +199,7 @@ class QueryResult(BaseModel):
     elapsed_ms: int = 0
 
 
-class ErrorPayload(BaseModel):
+class ErrorPayload(Out):
     stage: Literal["error"] = "error"
     failed_stage: Stage
     error_type: str
@@ -208,7 +216,7 @@ Payload = Annotated[
 ]
 
 
-class StageEvent(BaseModel):
+class StageEvent(Out):
     """One finished stage. On the wire: SSE `event: <stage>`, `data: <this as JSON>`."""
 
     elapsed_ms: int = Field(description="Since the question started.")
