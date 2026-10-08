@@ -57,9 +57,9 @@ would overfit to it. Full write-up: **[docs/EVAL_RESULTS.md](docs/EVAL_RESULTS.m
 
 ```mermaid
 flowchart LR
-    Q([Question]) --> G["Generate<br/>Claude Sonnet → typed SQL,<br/>a clarification, or a refusal"]
-    G -->|ambiguous| C([Ask which reading])
-    G -->|not in schema| R([Cannot answer])
+    Q(["Question"]) --> G["Generate<br/>Claude Sonnet → typed SQL,<br/>a clarification, or a refusal"]
+    G -->|ambiguous| C(["Ask which reading"])
+    G -->|not in schema| R(["Cannot answer"])
     G --> GR
 
     subgraph SAFE ["Two independent safety layers"]
@@ -68,14 +68,14 @@ flowchart LR
         GR --> EX
     end
 
-    GR -->|rejected| B([Blocked, rule named])
+    GR -->|rejected| B(["Blocked, rule named"])
     EX --> SA["Sanity checks<br/>result shape vs schema profile"]
     EX --> BT["Blind back-translation<br/>SQL → question (Haiku),<br/>judged against the original"]
     EX --> AG["Agreement<br/>independent second query,<br/>results compared"]
     SA --> CF
     BT --> CF
     AG --> CF
-    CF["Calibrated confidence<br/>logistic model fitted<br/>on the eval run"] --> A([Rows + SQL + every verdict + P(correct)])
+    CF["Calibrated confidence<br/>logistic model fitted<br/>on the eval run"] --> A(["Rows + SQL + every verdict + P(correct)"])
 ```
 
 - **Generate** (`generate.py`) sends the question, a compact introspected schema with column comments, a metric
