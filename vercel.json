@@ -8,7 +8,7 @@
     "app": {
       "root": "./",
       "framework": "fastapi",
-      "entrypoint": "queryguard.api.asgi:app",
+      "entrypoint": "asgi:app",
       "buildCommand": "uv run --frozen python -m queryguard.schema.introspect --refresh > /dev/null && echo 'schema cache built' || echo 'schema cache NOT built; the API will introspect at first use'"
     }
   },

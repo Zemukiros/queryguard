@@ -104,3 +104,16 @@ def _no_vercel_leak(monkeypatch):
     """Each test sets VERCEL itself; none may inherit it from the shell."""
     monkeypatch.delenv("VERCEL", raising=False)
     monkeypatch.delenv("VERCEL_ENV", raising=False)
+
+
+def test_the_root_shim_is_what_vercel_imports(monkeypatch, tmp_path) -> None:
+    """vercel.json names asgi:app; the shim must expose the same app object type."""
+    monkeypatch.setenv("QUERYGUARD_APP_DB", str(tmp_path / "app.db"))
+    import importlib
+
+    import asgi
+
+    importlib.reload(asgi)
+    assert asgi.app.title == "QueryGuard"
+    config = json.loads((Path(__file__).resolve().parent.parent / "vercel.json").read_text())
+    assert config["services"]["app"]["entrypoint"] == "asgi:app"
