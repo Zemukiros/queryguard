@@ -14,7 +14,8 @@ before changing it.
 
 ```bash
 cp .env.example .env                 # then fill in values; .env is gitignored, never commit it
-docker compose up -d                 # Postgres; db/init/*.sql runs on FIRST start only (empty volume)
+docker compose up -d db              # Postgres only; db/init/*.sql runs on FIRST start only (empty volume)
+docker compose up                    # full demo on :8080 (db + introspect + api + web), FAKE=0 for the real model
 uv sync
 uv run scripts/verify_db.py          # row counts + proof the read-only role cannot write
 
@@ -74,6 +75,11 @@ sequence and payloads); `run_question` / `run_answer` only drain it. Blocking SD
   ceiling read from the LLM call log, with a per-question reserve (503). History/feedback/cache live in SQLite
   (`store.py`, `data/app.db`) — never give the API a writable Postgres identity. Limits are env vars (`settings.py`).
   Stage exception text is logged, not returned.
+
+Packaging: `Dockerfile` (API, non-root, editable install so `REPO_ROOT` resolves) and `web/Dockerfile` (nginx,
+proxies `/v1` unbuffered). In compose the API holds only the read-only URL; the one-shot `introspect` service
+writes the schema cache with the owner URL. CI (`.github/workflows/ci.yml`) sets `QUERYGUARD_REQUIRE_DB=1`, which
+turns DB skips into failures.
 
 `web/` — Vite + React + TS (strict), Tailwind v4, TanStack Query, CodeMirror 6. `src/api/schema.ts` is GENERATED
 from the OpenAPI schema (`scripts/dump_openapi.py`, no server needed); use its types via `src/api/client.ts`, never

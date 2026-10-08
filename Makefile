@@ -10,7 +10,7 @@ help:
 	@echo "make web          Vite dev server only on :5173"
 	@echo "make gen-api      regenerate web/src/api/schema.ts from the FastAPI schema"
 	@echo "make test         pytest + vitest"
-	@echo "make e2e          Playwright against demo mode (needs docker compose up -d)"
+	@echo "make e2e          Playwright against demo mode (needs docker compose up -d db)"
 	@echo "make check        lint + typecheck + build + all tests"
 
 dev:

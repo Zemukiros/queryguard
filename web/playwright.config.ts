@@ -5,7 +5,7 @@ import { defineConfig, devices } from "@playwright/test";
 
 /**
  * e2e against the real API in fake-LLM mode ($0, no key needed) and the
- * production build. Postgres must be up (`docker compose up -d`). Ports differ
+ * production build. Postgres must be up (`docker compose up -d db`). Ports differ
  * from `make dev` (8000 / 5173) so both can run at once.
  */
 const API_PORT = 8010;

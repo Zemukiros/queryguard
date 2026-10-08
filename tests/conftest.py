@@ -36,7 +36,7 @@ def live_schema() -> DatabaseSchema:
     try:
         return introspect_database()
     except (SQLAlchemyError, RuntimeError) as exc:
-        skip_or_fail(f"queryguard-db not reachable, run `docker compose up -d` ({exc})")
+        skip_or_fail(f"queryguard-db not reachable, run `docker compose up -d db` ({exc})")
 
 
 @pytest.fixture(scope="session")
@@ -57,7 +57,7 @@ def live_database() -> None:
     except (SQLAlchemyError, RuntimeError) as exc:
         skip_or_fail(
             f"queryguard-db not reachable as queryguard_ro, "
-            f"run `docker compose up -d` ({exc})"
+            f"run `docker compose up -d db` ({exc})"
         )
 
 
