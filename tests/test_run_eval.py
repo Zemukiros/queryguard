@@ -415,3 +415,39 @@ def test_reusing_second_queries_rejudges_only_and_keeps_the_base_agreement(tmp_p
     assert "corrections" not in row and row["run_id"] == "dryrun-test"
     assert base["features"]["alignment"] == 0.2, "the base row is not mutated"
 
+
+def test_judge_only_reuses_the_stored_back_translation_and_copies_declines(tmp_path, live_database) -> None:
+    from dataclasses import replace
+
+    items = {i.id: i for i in build_items()}
+    stored = {"question": "Gross revenue from 2025 orders with paid statuses", "details": ["status IN (...)"]}
+    answered = {
+        "id": "gen:refund_04", "run_id": "base-run", "population": GENERATED, "category": "refund_trap",
+        "golden_id": "refund_04", "question": items["gen:refund_04"].question, "sql": "SELECT 1",
+        "label": "correct", "validation_errors": ["alignment: old failure", "agreement: kept"],
+        "features": dict(executed=True, self_confidence=1.0, alignment=0.6, discrepancy_count=1, sanity_fail=0,
+                         sanity_warn=0, sanity_info=0, agreement="agree", guardrail_rewrote=True,
+                         row_count_bucket="1"),
+        "detectors": {"alignment": {"score": 0.6, "discrepancies": ["x"], "back_translation": stored["question"],
+                                    "flagged": True}},
+        "calls": [{"step": "generate", "cost_usd": 0.01}, {"step": "back_translate", "output": stored, "cost_usd": 0.003}],
+    }
+    declined = {"id": "gen:ambig_01", "run_id": "base-run", "population": GENERATED, "features": None,
+                "label": "correct", "validation_errors": [], "calls": [{"step": "generate", "cost_usd": 0.01}]}
+    ctx = _context(tmp_path)
+    ctx.budget.judge_only = True
+    ctx = replace(ctx, reuse={"gen:refund_04": answered, "gen:ambig_01": declined}, judge_only=True,
+                  prompt_version="p-test")
+    assert ctx.budget.worst_case(GENERATED)[0] == 1
+
+    row = run_item(items["gen:refund_04"], ctx)
+    assert [c["step"] for c in row["calls"]] == ["judge"]
+    assert row["features"]["alignment"] == 1.0 and row["features"]["discrepancy_count"] == 0
+    assert row["detectors"]["alignment"]["flagged"] is False
+    assert row["detectors"]["alignment"]["back_translation"] == stored["question"], "back-translation is not redone"
+    assert row["validation_errors"] == ["agreement: kept"]
+    assert row["reused_from"] == "base-run" and row["prompt_version"] == "p-test"
+
+    copied = run_item(items["gen:ambig_01"], ctx)
+    assert copied["calls"] == [] and copied["cost_usd"] == 0 and copied["features"] is None
+

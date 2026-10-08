@@ -26,25 +26,27 @@ Postgres identity.
 
 ## Results
 
-From the recorded live run `full-2026-10-08`, prompt version `p-73b20568bab6` (50 questions through the full
-pipeline, plus 104 known-wrong mutation queries and 40 golden queries through back-translation and the judge).
-The full write-up, including which second queries were reused from earlier runs, is in
+From the recorded runs `full-2026-10-08` and `final-2026-10-08`, prompt version `p-02ea2fb3b358`: 50 questions
+through the full pipeline, plus 104 known-wrong mutation queries and 40 golden queries through back-translation
+and the judge. The full write-up, including which second queries were reused from earlier runs, is in
 [docs/EVAL_RESULTS.md](docs/EVAL_RESULTS.md).
+
+**These numbers are final for prompt version `p-02ea2fb3b358`.** The eval is frozen. More detector or prompt
+tuning against this golden set would overfit to it.
 
 | metric | result |
 |---|---|
 | Generation accuracy | **49/50** (39/40 answerable · 10/10 clarification/refusal) |
-| Wrong answers flagged (confidence < 0.5) | **97.1%** (101/104) |
+| Wrong answers flagged (confidence < 0.5) | **99.0%** (103/104) |
 | False flags on correct answers | **7.6%** (6/79) |
-| Brier score (out-of-fold, grouped 5-fold CV) | **0.041** (hand-set v0: 0.051) |
-| Spend for the run | $1.34, 450 API calls |
+| Brier score (out-of-fold, grouped 5-fold CV) | **0.038** (hand-set v0: 0.051) |
+| Spend for these runs | $1.52, 633 API calls |
 
 **Fixed after the first eval:** `refund_04`. In the first run (`live-2026-10-01`), "gross revenue before refunds" was
 answered including unpaid orders, and every check passed it. None of the checks knew the *business rule*. A metric
-glossary, shared by the generator, the schema comments and the alignment judge, plus a `revenue_status` sanity
-check fixed it. refund_04 is now correct with alignment 1.0, and both mutations that had slipped through are
-caught. The judge's glossary also over-reaches on four non-revenue questions. See
-[Fixed after first eval](docs/EVAL_RESULTS.md#fixed-after-first-eval).
+glossary, shared by the generator, the schema comments and (for revenue questions) the alignment judge, plus a
+`revenue_status` sanity check fixed it. refund_04 is now correct with alignment 1.0, and both mutations that had
+slipped through are caught. See [Fixed after first eval](docs/EVAL_RESULTS.md#fixed-after-first-eval).
 
 ## Architecture
 

@@ -4,6 +4,7 @@
     uv run python -m evals.run_eval --live --run-id ID    # real API; re-run the same ID to resume
     uv run python -m evals.run_eval --live --run-id ID --category refund_trap --population generated --population mutation
     uv run python -m evals.run_eval --live --run-id ID --reuse-second-sql BASE   # see "Reusing second queries"
+    uv run python -m evals.run_eval --live --run-id ID --judge-only BASE         # re-run the judge, nothing else
 
 Three populations, interleaved so a run stopped early still has all three:
 
@@ -37,6 +38,13 @@ Reusing second queries (--reuse-second-sql BASE)
   Generated items always run the full pipeline. Each row records
   `prompt_version` (queryguard.prompt_version) and, when reused,
   `second_sql_from`.
+
+Re-running only the judge (--judge-only BASE)
+  Every item copies BASE's corrected row and re-runs the alignment judge on
+  the back-translation BASE stored in its call record (question and details);
+  generation, back-translation and the second query are not repeated. Items
+  BASE never back-translated (clarifications, refusals) are copied with no
+  call. Rows record `reused_from`.
 
 Spending guards
 - Every API call is logged to evals/results/<run_id>.llm_calls.jsonl (the
@@ -251,6 +259,7 @@ class Budget:
     ) -> None:
         self.ledger = ledger
         self.reuse_second_sql = reuse_second_sql
+        self.judge_only = False
         self.max_calls = max_calls
         self.max_cost = max_cost
         self.step_max_cost = {s: profile[s]["max_cost"] for s in STEPS}
@@ -269,7 +278,9 @@ class Budget:
         return calls, cost
 
     def worst_case(self, population: str) -> tuple[int, float]:
-        if population == GENERATED:
+        if self.judge_only:
+            steps = ("judge",)
+        elif population == GENERATED:
             steps = STEPS
         else:
             steps = REJUDGE_STEPS if self.reuse_second_sql else STEPS[1:]
@@ -501,7 +512,8 @@ class Context:
     results_path: Path
     write_lock: threading.Lock = field(default_factory=threading.Lock)
     prompt_version: str = ""
-    reuse: dict[str, dict] | None = None  # id -> base corrected row, with --reuse-second-sql
+    reuse: dict[str, dict] | None = None  # id -> base corrected row, with --reuse-second-sql / --judge-only
+    judge_only: bool = False
 
 
 class TransientFailure(Exception):
@@ -549,7 +561,47 @@ def rejudge_item(item: Item, ctx: Context) -> dict:
     return base
 
 
+def judge_only_item(item: Item, ctx: Context) -> dict:
+    """Re-run the judge on BASE's stored back-translation; copy everything else."""
+    base = json.loads(json.dumps(ctx.reuse[item.id]))
+    for stale in ("corrections", "source_run"):
+        base.pop(stale, None)
+    stored = next((c["output"] for c in base["calls"] if c["step"] == "back_translate" and "output" in c), None)
+    calls: list[dict] = []
+    started = time.perf_counter()
+    if stored is not None:
+        validation_client = RecordingClient(ctx.sdk, VALIDATION_MODEL, ctx.budget, calls)
+        alignment, discrepancies, errors = None, [], [e for e in base["validation_errors"] if not e.startswith("alignment:")]
+        try:
+            judgement, _ = judge_alignment(item.question, BackTranslation(**stored), client=validation_client)
+            alignment, discrepancies = judgement.alignment, list(judgement.discrepancies)
+        except BudgetExhausted:
+            raise
+        except Exception as exc:  # noqa: BLE001 - recorded as the pipeline would
+            if type(exc).__name__ in TRANSIENT:
+                raise TransientFailure(f"{type(exc).__name__}: {exc}") from exc
+            errors.append(f"alignment: {type(exc).__name__}: {exc}")
+        features = {**base["features"], "alignment": alignment, "discrepancy_count": len(discrepancies)}
+        confidence, breakdown = score(Features(**features), V0_WEIGHTS)
+        base["detectors"]["alignment"].update(
+            score=alignment, discrepancies=discrepancies,
+            flagged=alignment is not None and alignment < ALIGNMENT_FLAG_BELOW,
+        )
+        base.update(features=features, confidence=confidence, confidence_breakdown=breakdown, validation_errors=errors)
+    elif base.get("features") is not None:
+        raise ValueError(f"{item.id}: base row has a feature vector but no stored back-translation")
+    base.update(
+        run_id=ctx.run_id, dry_run=ctx.dry_run, finished_at=datetime.now(timezone.utc).isoformat(),
+        calls=calls, n_calls=len(calls), cost_usd=round(sum(c["cost_usd"] for c in calls), 6),
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        prompt_version=ctx.prompt_version, reused_from=ctx.reuse[item.id]["run_id"],
+    )
+    return base
+
+
 def run_item(item: Item, ctx: Context) -> dict:
+    if ctx.judge_only:
+        return judge_only_item(item, ctx)
     if ctx.reuse is not None and item.population != GENERATED:
         return rejudge_item(item, ctx)
     calls: list[dict] = []
@@ -749,6 +801,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="only this population (repeatable)")
     parser.add_argument("--reuse-second-sql", metavar="BASE",
                         help="mutation/golden items: re-run back-translation and judge only, second query from BASE")
+    parser.add_argument("--judge-only", metavar="BASE", help="every item: re-run the judge only, the rest from BASE")
     args = parser.parse_args(argv)
 
     if args.live and not args.run_id:
@@ -792,17 +845,22 @@ def main(argv: list[str] | None = None) -> int:
     items = items[: args.limit] if args.limit else items
     schema = load_schema()
     reuse = None
-    if args.reuse_second_sql:
-        base_path = RESULTS_DIR / f"{args.reuse_second_sql}.corrected.jsonl"
+    if args.reuse_second_sql and args.judge_only:
+        parser.error("--reuse-second-sql and --judge-only are exclusive")
+    budget.judge_only = bool(args.judge_only)
+    base_id = args.reuse_second_sql or args.judge_only
+    if base_id:
+        base_path = RESULTS_DIR / f"{base_id}.corrected.jsonl"
         reuse = {r["id"]: r for r in map(json.loads, base_path.read_text(encoding="utf-8").splitlines()) if r}
-        missing = [i.id for i in items if i.population != GENERATED and i.id not in reuse]
+        missing = [i.id for i in items if (args.judge_only or i.population != GENERATED) and i.id not in reuse]
         if missing:
             parser.error(f"{len(missing)} items have no row in {base_path.name}, e.g. {missing[0]}")
     ctx = Context(run_id, dry_run, sdk, budget, schema, golden_frames(), results_path,
-                  prompt_version=prompt_version(schema), reuse=reuse)
+                  prompt_version=prompt_version(schema), reuse=reuse, judge_only=bool(args.judge_only))
     print(f"{'DRY RUN' if dry_run else 'LIVE'} {run_id} ({ctx.prompt_version}): {len(items)} items, "
           f"{len(finished_ids(results_path))} already finished"
-          + (f"; second queries reused from {args.reuse_second_sql}" if reuse else ""))
+          + (f"; second queries reused from {args.reuse_second_sql}" if args.reuse_second_sql else "")
+          + (f"; judge only, everything else from {args.judge_only}" if args.judge_only else ""))
     stop_reason = run(items, ctx, args.concurrency)
     unfinished = sorted({i.id for i in items} - finished_ids(results_path))
     stop_reason, exit_code = final_status(stop_reason, unfinished)

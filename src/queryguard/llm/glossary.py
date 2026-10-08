@@ -12,6 +12,8 @@ The same rule is stated in the schema comment on orders.total_amount
 
 from __future__ import annotations
 
+import re
+
 GLOSSARY = """\
 Glossary (fixed business definitions; they override any reading of your own):
 - Revenue, also called gross revenue: sum(orders.total_amount) over orders
@@ -20,3 +22,11 @@ Glossary (fixed business definitions; they override any reading of your own):
   date range or other filter the question adds. Refunded orders still count
   toward gross revenue.
 - Net revenue: gross revenue minus refunds.amount on those same orders."""
+
+# The terms GLOSSARY defines. "gross revenue" and "net revenue" contain "revenue".
+_TERMS = re.compile(r"\brevenues?\b", re.IGNORECASE)
+
+
+def uses_glossary_term(question: str) -> bool:
+    """Whether the question names a term the glossary defines."""
+    return bool(_TERMS.search(question))

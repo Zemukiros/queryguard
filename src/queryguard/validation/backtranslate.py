@@ -14,10 +14,12 @@ Two calls, both on Haiku:
    avoid. Shown only the SQL, it has to say what the SQL does.
 2. The judge sees the two questions and no schema. Its job is semantic
    comparison of two English sentences; the schema would only invite it to
-   re-derive the SQL, which is the back-translator's job. It does see the
-   metric glossary (llm/glossary.py): business definitions are not schema, and
-   without them it scored the correct refund_04 at 0.6 for applying the
-   revenue status rule the generator had been told to apply.
+   re-derive the SQL, which is the back-translator's job. When the
+   original question uses a glossary term ("revenue"), it also sees the metric
+   glossary (llm/glossary.py): business definitions are not schema, and without
+   them it scored the correct refund_04 at 0.6 for applying the revenue status
+   rule the generator had been told to apply. Only then: given to every
+   question, it read the rule into questions that never said revenue.
 
 The back-translation prefix is the schema plus fixed instructions, with the
 breakpoint on the last block, and nothing else: no few-shot examples, because
@@ -35,7 +37,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from queryguard.llm.client import CallResult, LLMClient
-from queryguard.llm.glossary import GLOSSARY
+from queryguard.llm.glossary import GLOSSARY, uses_glossary_term
 from queryguard.schema.introspect import DatabaseSchema
 
 VALIDATION_MODEL = "claude-haiku-4-5"
@@ -83,16 +85,32 @@ These are NOT discrepancies -- do not list them and do not lower the score:
   name beside an id);
 - column names or aliases;
 - a sort order the original did not ask about;
-- a row cap such as LIMIT 1000 or 1001 added for safety;
-- a filter or definition that the glossary below makes part of the term the
-  original uses. "Revenue" means the glossary's revenue, so a status filter
-  that keeps paid, shipped, delivered and refunded orders IS what the original
-  asked for, even though the original never mentions statuses. Leaving that
-  filter out, when the original asks about revenue, IS a discrepancy.
+- a row cap such as LIMIT 1000 or 1001 added for safety."""
+
+# Appended only when the ORIGINAL question uses a glossary term. Given to every
+# question (full-2026-10-08), the judge read "total order amount" and "largest
+# orders by total amount" as revenue and flagged correct queries for keeping
+# pending orders -- four false flags on questions that never said revenue.
+JUDGE_GLOSSARY = """\
+The ORIGINAL question uses a term the glossary below defines, and the glossary
+is what that term means here. A filter or definition the glossary makes part
+of the term is NOT a discrepancy: a status filter that keeps paid, shipped,
+delivered and refunded orders IS what a question about revenue asked for, even
+though it never mentions statuses. Leaving that filter out of a revenue figure
+IS a discrepancy. The original's own words win over the glossary: when it
+states its own filter or metric ("excluding cancelled orders", "line-item
+revenue"), compare against what it states.
 
 """ + GLOSSARY + """
 - An unqualified "revenue" may be read as gross or net; either reading
   matches it, but both exclude pending and cancelled orders."""
+
+
+def judge_instructions(original: str) -> str:
+    """The judge's system text: the glossary rule only for questions that use a glossary term."""
+    if uses_glossary_term(original):
+        return JUDGE_INSTRUCTIONS + "\n\n" + JUDGE_GLOSSARY
+    return JUDGE_INSTRUCTIONS
 
 
 class BackTranslation(BaseModel):
@@ -150,7 +168,7 @@ def judge_alignment(
         f"Details of what the query computes:\n{details}"
     )
     result = client.complete(
-        [{"type": "text", "text": JUDGE_INSTRUCTIONS}],
+        [{"type": "text", "text": judge_instructions(original)}],
         message,
         output_format=AlignmentJudgement,
         max_tokens=1024,

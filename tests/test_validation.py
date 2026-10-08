@@ -230,11 +230,28 @@ def test_the_judge_accepts_the_glossary_status_filter_on_revenue() -> None:
     system = " ".join(block["text"] for block in request["system"])
     assert GLOSSARY in system and GLOSSARY in SYSTEM_INSTRUCTIONS, "judge and generator share one definition"
     flat = " ".join(system.split())
-    assert "a status filter that keeps paid, shipped, delivered and refunded orders IS what the original asked for" in flat
-    assert "Leaving that filter out, when the original asks about revenue, IS a discrepancy" in flat
+    assert "a status filter that keeps paid, shipped, delivered and refunded orders IS what a question about revenue asked for" in flat
+    assert "Leaving that filter out of a revenue figure IS a discrepancy" in flat
+    assert "The original's own words win over the glossary" in flat
     assert "Database schema" not in system, "the glossary is business definitions, still no schema"
     assert "status IN ('paid','shipped','delivered','refunded')" in request["messages"][0]["content"]
     assert judgement.alignment == 1.0 and judgement.discrepancies == []
+
+
+@pytest.mark.parametrize("question", [
+    "What was the total order amount for orders placed in March 2026?",  # date_02
+    "What are the 10 largest orders by total amount?",  # topn_03
+])
+def test_the_judge_gets_no_glossary_when_the_question_names_no_glossary_term(question) -> None:
+    """full-2026-10-08: given to every question, the rule turned "total amount" into revenue."""
+    from queryguard.llm.glossary import GLOSSARY
+
+    fake = _Fake(AlignmentJudgement(alignment=1.0, discrepancies=[]))
+    judge_alignment(question, BackTranslation(question="Sum of total_amount", details=[]),
+                    client=LLMClient(sdk_client=fake, model=VALIDATION_MODEL))
+    system = " ".join(block["text"] for block in fake.messages.calls[0]["system"])
+    assert GLOSSARY not in system
+    assert "glossary" not in system.lower()
 
 
 def test_alignment_is_bounded_zero_to_one() -> None:

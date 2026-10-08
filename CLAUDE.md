@@ -93,5 +93,7 @@ set (`golden.yaml`), mutation negatives and the calibration harness; live run ou
 - **Anything that calls the API costs money.** Prefer the dry run / fake client; tests must not make live calls.
   Ask before a `--live` eval or any script that hits the API, and state the expected call count.
 - Reported metrics come only from recorded runs in `evals/results/`; don't quote numbers without one.
+- **The eval is frozen** at prompt version `p-02ea2fb3b358` (`final-2026-10-08`). Don't tune detectors or prompts
+  against `evals/golden.yaml` any further; it would overfit. A change needs a fresh, held-out question set.
 - `logs/` (LLM call logs) and `.env` are gitignored — keep it that way; logs can contain question text and cost data.
 - Determinism: sessions run in UTC, eval runs are resumable by `--run-id`, and labels are recomputable offline.
