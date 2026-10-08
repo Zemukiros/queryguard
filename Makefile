@@ -1,5 +1,5 @@
 # QueryGuard developer commands. `make dev FAKE=1` is the $0 way to see the UI.
-.PHONY: help dev api web gen-api test test-py test-web e2e lint check
+.PHONY: help dev api web gen-api test test-py test-web e2e lint check neon-init
 
 FAKE ?= 0
 
@@ -12,6 +12,7 @@ help:
 	@echo "make test         pytest + vitest"
 	@echo "make e2e          Playwright against demo mode (needs docker compose up -d db)"
 	@echo "make check        lint + typecheck + build + all tests"
+	@echo "make neon-init    seed the Neon database from db/init and verify the read-only role (.env.neon)"
 
 dev:
 	FAKE=$(FAKE) scripts/dev.sh
@@ -41,3 +42,6 @@ lint:
 
 check: lint test e2e
 	cd web && npm run build
+
+neon-init:
+	uv run python scripts/init_remote_db.py

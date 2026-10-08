@@ -2,6 +2,11 @@
 .env
 .env.*
 !.env.example
+# Editor swap and lock files: vim/nano name the one for .env.neon "..env.neon.swp",
+# which `.env.*` does not match, and it can hold the file's contents.
+*.swp
+*.swo
+*~
 
 # Python
 __pycache__/
