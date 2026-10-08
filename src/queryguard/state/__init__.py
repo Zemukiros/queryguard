@@ -159,6 +159,10 @@ class AppState(ABC):
 
 def make_state(settings: Settings) -> AppState:
     """RedisState when settings.redis_url is set, else LocalState."""
+    if settings.redis_url:
+        from queryguard.state.redis import RedisState
+
+        return RedisState(settings)
     from queryguard.state.local import LocalState
 
     return LocalState(settings)

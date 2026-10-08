@@ -11,6 +11,13 @@ setting variables, never by editing code:
     QUERYGUARD_APP_DB                SQLite file for history, feedback and cache (data/app.db)
     QUERYGUARD_TRUST_PROXY           1 = client IP from the last X-Forwarded-For hop (0)
     QUERYGUARD_FAKE_LLM              1 = answer from llm/fake.py, never the API; $0 (0)
+    QUERYGUARD_REDIS_URL             app state in Redis (queryguard.state.redis), shared by every
+                                     instance; unset = in-process state (queryguard.state.local)
+    QUERYGUARD_STATE_PREFIX          prefix for every Redis key, so deployments can share one
+                                     database without seeing each other's state (qg:)
+    QUERYGUARD_DAILY_CALL_CAP        LLM calls per UTC day across all instances (Redis state) (200)
+    QUERYGUARD_RESERVATION_TTL_S     a spend reservation expires after this, so one held by a
+                                     crashed instance frees itself (300, the platform time limit)
 
 Fake mode also points the LLM call log at logs/fake_llm_calls.jsonl (unless
 QUERYGUARD_LLM_LOG is set), so the real ledger -- and the spend ceiling read
@@ -53,6 +60,10 @@ class Settings:
     db_path: Path = field(default_factory=lambda: REPO_ROOT / "data" / "app.db")
     trust_proxy: bool = False
     fake_llm: bool = False
+    redis_url: str | None = None
+    state_prefix: str = "qg:"
+    daily_call_cap: int = 200
+    reservation_ttl_s: float = 300.0
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -70,4 +81,8 @@ class Settings:
             db_path=REPO_ROOT / _env("QUERYGUARD_APP_DB", "data/app.db"),
             trust_proxy=_env("QUERYGUARD_TRUST_PROXY", "0") == "1",
             fake_llm=_env("QUERYGUARD_FAKE_LLM", "0") == "1",
+            redis_url=_env("QUERYGUARD_REDIS_URL", "") or None,
+            state_prefix=_env("QUERYGUARD_STATE_PREFIX", "qg:"),
+            daily_call_cap=int(_env("QUERYGUARD_DAILY_CALL_CAP", "200")),
+            reservation_ttl_s=float(_env("QUERYGUARD_RESERVATION_TTL_S", "300")),
         )

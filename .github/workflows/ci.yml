@@ -37,6 +37,15 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U queryguard -d queryguard"
           --health-interval 5s --health-timeout 5s --health-retries 20
+      # RedisState's tests, Lua scripts included, run against a real Redis.
+      redis:
+        image: redis:7.4-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      QUERYGUARD_TEST_REDIS_URL: redis://localhost:6379/15
     steps:
       - uses: actions/checkout@v7
       - name: Initialise the database from db/init (as the image entrypoint would)

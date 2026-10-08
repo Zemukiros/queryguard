@@ -32,6 +32,7 @@ response. Clients get the stage, the exception type and a short message.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
@@ -276,10 +277,12 @@ class _State:
         return self._schema
 
     def clients(self) -> tuple[LLMClient, LLMClient]:
+        # Real clients are capped and recorded by the state's call guard: with
+        # Redis state, a daily call cap and spend ledger shared by every instance.
         if self._client is None:
-            self._client = LLMClient()
+            self._client = LLMClient(guard=self.store.call_guard())
         if self._validation_client is None:
-            self._validation_client = LLMClient(model=VALIDATION_MODEL)
+            self._validation_client = LLMClient(model=VALIDATION_MODEL, guard=self.store.call_guard())
         return self._client, self._validation_client
 
 
@@ -418,14 +421,20 @@ def create_app(
             return cached
         assert reservation is not None
         query_id = uuid.uuid4().hex
-        async for event in run(question, sql, client, key, query_id, reservation, source):
-            if event.stage == "done":
-                return event.payload
-            if event.stage == "error":
-                payload: ErrorPayload = event.payload
-                error = ErrorResponse(query_id=query_id, failed_stage=payload.failed_stage,
-                                      error_type=payload.error_type, message=payload.message)
-                return JSONResponse(error.model_dump(), status_code=_error_status(event.exception))
+        # aclosing: returning from inside `async for` leaves the generator
+        # suspended, and its `finally` -- which releases the reservation --
+        # would run only when garbage collection gets to it. On a serverless
+        # instance frozen after the response, that can mean never, holding a
+        # budget slot until the reservation expires.
+        async with contextlib.aclosing(run(question, sql, client, key, query_id, reservation, source)) as events:
+            async for event in events:
+                if event.stage == "done":
+                    return event.payload
+                if event.stage == "error":
+                    payload: ErrorPayload = event.payload
+                    error = ErrorResponse(query_id=query_id, failed_stage=payload.failed_stage,
+                                          error_type=payload.error_type, message=payload.message)
+                    return JSONResponse(error.model_dump(), status_code=_error_status(event.exception))
         raise HTTPException(500, detail="pipeline ended without a result")
 
     async def answer_stream(question: str, sql: str | None, request: Request, source: str = "user") -> StreamingResponse:
@@ -436,8 +445,13 @@ def create_app(
                 yield sse(StageEvent(elapsed_ms=0, duration_ms=0, payload=cached))
                 return
             assert reservation is not None
-            async for event in run(question, sql, client, key, uuid.uuid4().hex, reservation, source):
-                yield sse(event)
+            # aclosing: a client that disconnects mid-stream closes this
+            # generator; closing the inner one too releases the reservation now.
+            async with contextlib.aclosing(
+                run(question, sql, client, key, uuid.uuid4().hex, reservation, source)
+            ) as stream:
+                async for event in stream:
+                    yield sse(event)
 
         return StreamingResponse(
             events(), media_type="text/event-stream",

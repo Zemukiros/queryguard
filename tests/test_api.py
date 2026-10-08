@@ -385,3 +385,10 @@ def test_a_blocked_query_has_no_contributions(tmp_path) -> None:
     payload = dict(_events(_stream(client, "x")))["confidence"]["payload"]
     assert payload["confidence"] == 0.0 and payload["band"] == "low"
     assert payload["contributions"] == [] and payload["logit"] is None
+
+
+def test_a_json_answer_releases_its_reservation_before_returning(tmp_path) -> None:
+    """Returning from inside `async for` used to leave the release to the garbage collector."""
+    client, _ = _client(tmp_path, _answer(COUNT_SQL))
+    assert client.post("/v1/query", json={"question": "How many orders were cancelled?"}).status_code == 200
+    assert client.app.state.qg.store._reserved == set()
