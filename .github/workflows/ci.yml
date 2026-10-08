@@ -38,7 +38,7 @@ jobs:
           --health-cmd "pg_isready -U queryguard -d queryguard"
           --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Initialise the database from db/init (as the image entrypoint would)
         run: |
           for f in db/init/*.sql; do
@@ -47,7 +47,7 @@ jobs:
               psql -v ON_ERROR_STOP=1 -q -U queryguard -d queryguard < "$f"
             echo "::endgroup::"
           done
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
@@ -66,8 +66,8 @@ jobs:
       run:
         working-directory: web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -94,19 +94,19 @@ jobs:
           --health-cmd "pg_isready -U queryguard -d queryguard"
           --health-interval 5s --health-timeout 5s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Initialise the database from db/init
         run: |
           for f in db/init/*.sql; do
             docker exec -i ${{ job.services.postgres.id }} \
               psql -v ON_ERROR_STOP=1 -q -U queryguard -d queryguard < "$f"
           done
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@v10
         with:
           version: ${{ env.UV_VERSION }}
           enable-cache: true
           cache-dependency-glob: uv.lock
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -125,7 +125,7 @@ jobs:
       - run: npm run e2e
         working-directory: web
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-traces
           path: web/test-results/
