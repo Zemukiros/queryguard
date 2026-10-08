@@ -148,9 +148,9 @@ class ConfidencePayload(Out):
 
 Mode = Literal["live", "demo"]
 # Why a question ran in demo mode: a demo-only deployment (QUERYGUARD_FAKE_LLM=1),
-# live answers switched off (QUERYGUARD_LIVE=0), today's spend ceiling, or
-# today's cap on LLM calls.
-ModeReason = Literal["demo_deployment", "switched_off", "budget", "call_cap"]
+# live answers switched off (QUERYGUARD_LIVE=0), today's spend ceiling, today's
+# cap on LLM calls, or the model API unusable (no key, or the key was refused).
+ModeReason = Literal["demo_deployment", "switched_off", "budget", "call_cap", "model_unavailable"]
 
 
 class QueryResult(Out):

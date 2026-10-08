@@ -89,6 +89,8 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
 
 export const api = {
   health: () => getJson<Health>("/healthz"),
+  /** Loads the pipeline on a cold serverless instance; free and rate-limit exempt. */
+  warm: () => apiFetch("/v1/warm", { method: "POST" }),
   schema: () => getJson<SchemaResponse>("/v1/schema"),
   history: (limit = 30) => getJson<HistoryItem[]>(`/v1/history?limit=${limit}`),
   historyItem: (queryId: string) => getJson<QueryResult>(`/v1/history/${encodeURIComponent(queryId)}`),

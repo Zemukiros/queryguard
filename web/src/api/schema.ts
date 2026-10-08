@@ -164,6 +164,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/warm": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Warm
+         * @description Load what the first question needs, once per instance (see the module docstring).
+         */
+        post: operations["warm_v1_warm_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -479,7 +499,7 @@ export interface components {
              * Mode Reason
              * @description Why demo mode; None when live.
              */
-            mode_reason: ("demo_deployment" | "switched_off" | "budget" | "call_cap") | null;
+            mode_reason: ("demo_deployment" | "switched_off" | "budget" | "call_cap" | "model_unavailable") | null;
             /**
              * Resets In S
              * @description Seconds until the budget and call cap reset (00:00 UTC), when they are the reason for demo mode.
@@ -635,7 +655,7 @@ export interface components {
              * Mode Reason
              * @description Why it ran in demo mode; None when live.
              */
-            mode_reason: ("demo_deployment" | "switched_off" | "budget" | "call_cap") | null;
+            mode_reason: ("demo_deployment" | "switched_off" | "budget" | "call_cap" | "model_unavailable") | null;
             /**
              * N Calls
              * @default 0
@@ -805,6 +825,16 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** Warm */
+        Warm: {
+            /** Elapsed Ms */
+            elapsed_ms: number;
+            /**
+             * Warmed
+             * @description True if this call did the work; False if the instance was already warm.
+             */
+            warmed: boolean;
         };
     };
     responses: never;
@@ -1204,6 +1234,26 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SchemaResponse"];
+                };
+            };
+        };
+    };
+    warm_v1_warm_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Warm"];
                 };
             };
         };

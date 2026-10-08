@@ -47,6 +47,10 @@ Changing an environment variable takes effect on the **next deployment**: redepl
 7. Kill-switch drill: `QUERYGUARD_LIVE=0`, redeploy, confirm demo mode; then back to `1` and redeploy.
 
 **Emergency stop:** set `QUERYGUARD_LIVE=0` and redeploy, or revoke the Anthropic key. Either is enough on its own.
+A missing, expired or refused key (401/403) never shows up as an error: questions run in demo mode with
+`mode_reason: "model_unavailable"`. A question that hits a refused key on its first call is re-run in demo mode
+before anything reaches the browser. The instance then skips the live path for 5 minutes before it tries the key
+again.
 
 ## Measured on preview deployments (demo mode)
 
@@ -57,7 +61,9 @@ Changing an environment variable takes effect on the **next deployment**: redepl
 | `import asgi` locally (warm) | 1.12–1.15 s | 0.38–0.44 s |
 
 - **Imports moved to the first question.** The lazy imports move pandas, sqlalchemy and the pipeline to the
-  first question on a fresh instance. On the preview that added about 2 s before its first event.
+  first question on a fresh instance. On the preview that added about 2 s before its first event. So the page
+  now sends `POST /v1/warm` on load, fire and forget. It loads those modules and opens one read-only connection,
+  which also wakes Neon. It makes no model call, spends nothing, isn't rate-limited and runs once per instance.
 - **Other checks on the preview:**
   - **SSE:** events reach the browser in separate chunks, 0.12–0.18 s after the server sends them.
   - **Rate limit:** 14 concurrent questions against the 10/minute limit: exactly 10 admitted.

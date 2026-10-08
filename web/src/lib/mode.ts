@@ -27,5 +27,7 @@ export function modeCopy(reason: ModeReason, resetsInS?: number | null): { label
       return { label: `Demo mode · today's live budget is used up${resets}`, detail: `Today's spending limit for the real model is reached. ${sim}` };
     case "call_cap":
       return { label: `Demo mode · today's live limit is reached${resets}`, detail: `Today's limit on model calls is reached. ${sim}` };
+    case "model_unavailable":
+      return { label: "Demo mode · the live model is unavailable", detail: `The language model can't be reached right now. ${sim}` };
   }
 }

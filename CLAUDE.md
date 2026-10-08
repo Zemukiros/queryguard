@@ -73,7 +73,10 @@ sequence and payloads); `run_question` / `run_answer` only drain it. Blocking SD
 - `api/` — FastAPI (`app.py`; `create_app()` is the factory, tests inject a schema and fake-backed clients).
   Admission before any API call: cache hit (free, no rate-limit use) → per-client rate limit (429) → mode. A question
   runs live unless the deployment is demo-only, `QUERYGUARD_LIVE=0`, the spend ceiling has no room, or the daily call
-  cap is near — then it runs on the simulated model and says why (`mode`, `mode_reason`; never cached).
+  cap is near, or the model API is unusable (no key, or 401/403: `model_unavailable`, the question is re-run in
+  demo mode before anything is sent) — then it runs on the simulated model and says why (`mode`, `mode_reason`;
+  never cached). `POST /v1/warm` (sent by the page on load) loads the pipeline once per instance, $0, no rate
+  limit. Startup and `/healthz` must not import anthropic/pandas/sqlalchemy (tests/test_platform.py).
   Limits are env vars (`settings.py`). Stage exception text is logged, not returned.
 - `state/` — ALL of the API's own state behind `AppState`: rate limits, spend reservations, today's spend, the LLM
   call guard (daily call cap + spend ledger), cache, history, feedback, client salt. `LocalState` (in-process +

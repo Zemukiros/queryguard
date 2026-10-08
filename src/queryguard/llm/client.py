@@ -86,6 +86,12 @@ def sdk_error_types() -> tuple[type[BaseException], ...]:
     return (sdk.APIError,) if sdk is not None else ()
 
 
+def is_auth_failure(exc: BaseException | None) -> bool:
+    """The API refused the key: missing, expired or revoked (401), or not allowed (403)."""
+    sdk = sys.modules.get("anthropic")
+    return sdk is not None and isinstance(exc, (sdk.AuthenticationError, sdk.PermissionDeniedError))
+
+
 class RequestCapExceeded(RuntimeError):
     """The process-wide request cap was hit. No API call was made."""
 

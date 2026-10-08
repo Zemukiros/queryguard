@@ -24,6 +24,17 @@ it runs in demo mode (the simulated model, $0) and says why (`mode`,
 `mode_reason`). Demo answers are never cached. See settings.py for every
 limit. A streamed cache hit is a single `done` event.
 
+The model being unusable is a mode, not an error: with no ANTHROPIC_API_KEY,
+or a key the API refuses (401/403), questions run in demo mode with
+mode_reason "model_unavailable". A refused key is found on the first call; that
+question is re-run in demo mode before anything reaches the client, and this
+instance skips the live path for MODEL_RETRY_S before trying the key again.
+
+POST /v1/warm is what the web app sends on page load: it loads the pipeline's
+modules and opens one read-only database connection, so a cold instance's
+first question does not pay for them. No rate limit, no model call, no spend;
+it does the work once per instance and answers at once after that.
+
 The database boundary is unchanged: generated SQL still runs only as
 `queryguard_ro` through the executor. The app's own state (limits, spend,
 cache, history) sits behind queryguard.state.AppState.
@@ -39,6 +50,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -53,8 +65,16 @@ from pydantic import BaseModel, Field, field_validator
 
 from queryguard.api.limits import seconds_until_utc_midnight
 from queryguard.api.settings import Settings
+from queryguard.config import load_env
 from queryguard.events import ErrorPayload, Mode, ModeReason, Out, QueryResult, StageEvent
-from queryguard.llm.client import DEFAULT_MODEL, MAX_CALLS_PER_QUESTION, LLMClient, RequestCapExceeded, sdk_error_types
+from queryguard.llm.client import (
+    DEFAULT_MODEL,
+    MAX_CALLS_PER_QUESTION,
+    LLMClient,
+    RequestCapExceeded,
+    is_auth_failure,
+    sdk_error_types,
+)
 from queryguard.generate import Ambiguity, GeneratedSQL
 from queryguard.text import normalize_question, normalize_sql
 from queryguard.schema.introspect import DatabaseSchema, TableInfo, load_schema
@@ -69,6 +89,9 @@ MAX_QUESTION_CHARS = 500
 MAX_SQL_CHARS = 5000
 USER_SQL_SELF_CONFIDENCE = 0.5
 MAX_HISTORY = 100
+# After the API refuses the key, how long an instance runs questions in demo
+# mode before it tries the key again.
+MODEL_RETRY_S = 300.0
 
 # Outcomes worth replaying for free. A failed or errored run might succeed on a
 # retry, and one with a validation error is missing a signal; neither is cached.
@@ -180,6 +203,11 @@ class Budget(Out):
     daily_ceiling_usd: float
 
 
+class Warm(Out):
+    warmed: bool = Field(description="True if this call did the work; False if the instance was already warm.")
+    elapsed_ms: int
+
+
 class Health(Out):
     status: str
     version: str
@@ -285,6 +313,10 @@ class _State:
         self._client = client
         self._validation_client = validation_client
         self._demo: tuple[LLMClient, LLMClient] | None = None
+        self._injected = client is not None
+        self._model_unavailable_until = 0.0
+        self._warm = False
+        self._warm_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._health: tuple[float, tuple[Mode, ModeReason | None, float]] | None = None
 
@@ -318,12 +350,23 @@ class _State:
         return self._demo
 
     def blocked_mode(self) -> ModeReason | None:
-        """A reason that applies before any budget check: a demo deployment or the kill switch."""
+        """A reason that applies before any budget check: a demo deployment, the kill
+        switch, or a model API this instance cannot use."""
         if self.settings.fake_llm:
             return "demo_deployment"
         if not self.settings.live:
             return "switched_off"
+        if not self._injected:  # tests inject clients; a real one needs a key
+            load_env()
+            if not (os.getenv("ANTHROPIC_API_KEY") or "").strip():
+                return "model_unavailable"
+        if time.monotonic() < self._model_unavailable_until:
+            return "model_unavailable"
         return None
+
+    def mark_model_unavailable(self) -> None:
+        self._model_unavailable_until = time.monotonic() + MODEL_RETRY_S
+        self._health = None
 
     def call_cap_near(self) -> bool:
         """True when a whole question might not fit under today's call cap."""
@@ -440,50 +483,79 @@ def create_app(
         which is the same guardrail, executor and validators from `guardrails` on.
         Demo mode runs the same pipeline on the simulated model. An `error`
         event comes out already made public (see _public_error).
+
+        If the API refuses the key on the first call, before any event has been
+        sent, the question is re-run in demo mode (mode_reason
+        "model_unavailable") and the client only ever sees the demo run.
         """
         from queryguard.pipeline import stream_answer, stream_question
 
         client, key = admitted.client, admitted.key
         try:
-            llm, validation_llm = state.clients() if admitted.mode == "live" else state.demo_clients()
             schema = await state.schema()
-            if sql is None:
-                stream = stream_question(question, client=llm, validation_client=validation_llm,
-                                         schema=schema, query_id=query_id)
-            else:
-                stream = stream_answer(question, user_answer(sql), client=llm,
-                                       validation_client=validation_llm, schema=schema, query_id=query_id)
-            async for event in stream:
-                if event.stage == "done":
-                    result: QueryResult = event.payload
-                    update: dict[str, Any] = {"mode": admitted.mode, "mode_reason": admitted.reason}
-                    if sql is not None:
-                        update["sql_source"] = source
-                    result = result.model_copy(update=update)
-                    event.payload = result
-                    await asyncio.to_thread(record, result, client)
-                    # Only live answers are cached: a cached answer is served as a
-                    # real one, and a simulated answer must never be.
-                    if admitted.mode == "live" and result.outcome in _CACHEABLE and not result.validation_errors:
-                        await asyncio.to_thread(state.store.cache_put, key, result.model_dump(mode="json"))
-                elif event.stage == "error":
-                    logger.error("query %s failed in %s", query_id, event.payload.failed_stage,
-                                 exc_info=event.exception)
-                    error = _public_error(event, query_id)
-                    await asyncio.to_thread(
-                        state.store.record, query_id=query_id, client=client, question=question,
-                        outcome="error", confidence=None, cached=False, cost_usd=0.0,
-                        elapsed_ms=event.elapsed_ms, sql_source="model" if sql is None else source,
-                        result=error.model_dump(), mode=admitted.mode,
-                    )
-                    public = StageEvent(
-                        elapsed_ms=event.elapsed_ms, duration_ms=event.duration_ms,
-                        payload=ErrorPayload(failed_stage=error.failed_stage, error_type=error.error_type,
-                                             message=error.message),
-                    )
-                    public._exception = event.exception
-                    event = public
-                yield event
+            while True:
+                llm, validation_llm = state.clients() if admitted.mode == "live" else state.demo_clients()
+                if sql is None:
+                    stream = stream_question(question, client=llm, validation_client=validation_llm,
+                                             schema=schema, query_id=query_id)
+                else:
+                    stream = stream_answer(question, user_answer(sql), client=llm,
+                                           validation_client=validation_llm, schema=schema, query_id=query_id)
+                sent = 0
+                retry_in_demo = False
+                async with contextlib.aclosing(stream) as events:
+                    async for event in events:
+                        if event.stage == "error" and admitted.mode == "live" and is_auth_failure(event.exception):
+                            logger.error("the model API refused the key (%s); demo mode for %.0f s",
+                                         type(event.exception).__name__, MODEL_RETRY_S)
+                            state.mark_model_unavailable()
+                            if sent == 0:
+                                retry_in_demo = True
+                                break
+                        if event.stage == "done":
+                            result: QueryResult = event.payload
+                            if admitted.mode == "live" and any(
+                                "AuthenticationError" in e or "PermissionDeniedError" in e
+                                for e in result.validation_errors
+                            ):
+                                state.mark_model_unavailable()  # a later call was refused: next questions
+                            update: dict[str, Any] = {"mode": admitted.mode, "mode_reason": admitted.reason}
+                            if sql is not None:
+                                update["sql_source"] = source
+                            result = result.model_copy(update=update)
+                            event.payload = result
+                            await asyncio.to_thread(record, result, client)
+                            # Only live answers are cached: a cached answer is served as a
+                            # real one, and a simulated answer must never be.
+                            if admitted.mode == "live" and result.outcome in _CACHEABLE and not result.validation_errors:
+                                await asyncio.to_thread(state.store.cache_put, key, result.model_dump(mode="json"))
+                        elif event.stage == "error":
+                            logger.error("query %s failed in %s", query_id, event.payload.failed_stage,
+                                         exc_info=event.exception)
+                            error = _public_error(event, query_id)
+                            await asyncio.to_thread(
+                                state.store.record, query_id=query_id, client=client, question=question,
+                                outcome="error", confidence=None, cached=False, cost_usd=0.0,
+                                elapsed_ms=event.elapsed_ms, sql_source="model" if sql is None else source,
+                                result=error.model_dump(), mode=admitted.mode,
+                            )
+                            public = StageEvent(
+                                elapsed_ms=event.elapsed_ms, duration_ms=event.duration_ms,
+                                payload=ErrorPayload(failed_stage=error.failed_stage, error_type=error.error_type,
+                                                     message=error.message),
+                            )
+                            public._exception = event.exception
+                            event = public
+                        sent += 1
+                        yield event
+                if not retry_in_demo:
+                    return
+                # Nothing was sent: switch this question to demo mode. A demo
+                # run spends nothing, so its reservation goes back now.
+                if admitted.reservation is not None:
+                    await asyncio.to_thread(state.store.release, admitted.reservation)
+                    admitted.reservation = None
+                admitted.mode, admitted.reason = "demo", "model_unavailable"
         finally:
             if admitted.reservation is not None:
                 await asyncio.to_thread(state.store.release, admitted.reservation)
@@ -594,6 +666,27 @@ def create_app(
             raise HTTPException(404, detail=f"no query with id {body.query_id!r}")
         created_at = await asyncio.to_thread(state.store.save_feedback, body.query_id, body.correct, body.note)
         return FeedbackResponse(query_id=body.query_id, correct=body.correct, note=body.note, created_at=created_at)
+
+    @app.post("/v1/warm", response_model=Warm)
+    async def warm() -> Warm:
+        """Load what the first question needs, once per instance (see the module docstring)."""
+        started = time.perf_counter()
+        if state._warm:
+            return Warm(warmed=False, elapsed_ms=0)
+
+        def load() -> None:
+            import queryguard.pipeline  # noqa: F401  pandas, sqlparse, the validators
+            from queryguard.executor import execute
+
+            execute("SELECT 1")  # sqlalchemy + psycopg, and wakes a scaled-to-zero database
+            if state.blocked_mode() is None:
+                state.clients()  # builds the SDK client: no request is made
+
+        async with state._warm_lock:
+            if not state._warm:
+                await asyncio.to_thread(load)
+                state._warm = True
+        return Warm(warmed=True, elapsed_ms=int((time.perf_counter() - started) * 1000))
 
     @app.get("/healthz", response_model=Health)
     async def healthz() -> Health:

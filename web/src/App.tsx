@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
-import type { PayloadOf } from "./api/client";
+import { api, type PayloadOf } from "./api/client";
 import { ClarificationView } from "./components/ClarificationView";
 import { ConfidenceCard } from "./components/ConfidenceCard";
 import { FeedbackControls } from "./components/FeedbackControls";
@@ -35,6 +35,9 @@ export default function App() {
   const { theme, toggle } = useTheme();
   const [question, setQuestion] = useState("");
   const [schemaOpen, setSchemaOpen] = useState(false);
+  // Fire and forget: a cold serverless instance loads the pipeline now, while
+  // the visitor reads, instead of on their first question. No model call, $0.
+  useEffect(() => { void api.warm().catch(() => undefined); }, []);
   const [edit, setEdit] = useState<{ runId: number; sql: string } | null>(null);
 
   const { result } = state;

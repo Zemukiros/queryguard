@@ -430,3 +430,71 @@ def test_a_json_answer_releases_its_reservation_before_returning(tmp_path) -> No
     client, _ = _client(tmp_path, _answer(COUNT_SQL))
     assert client.post("/v1/query", json={"question": "How many orders were cancelled?"}).status_code == 200
     assert client.app.state.qg.store._reserved == set()
+
+
+# ------------------------------------------------- the model, unavailable
+
+
+class _RefusingSDK:
+    """An SDK whose every call is refused, like a revoked or expired key (401)."""
+
+    def __init__(self, status: int = 401) -> None:
+        self.messages = self
+        self.calls: list[dict] = []
+        self.status = status
+
+    def parse(self, **kwargs):
+        import anthropic
+        import httpx2
+
+        self.calls.append(kwargs)
+        response = httpx2.Response(self.status, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages"))
+        error = anthropic.AuthenticationError if self.status == 401 else anthropic.PermissionDeniedError
+        raise error(message="invalid x-api-key", response=response, body=None)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_key_reruns_the_question_in_demo_mode(tmp_path, live_database, status) -> None:
+    refusing = _RefusingSDK(status)
+    app = create_app(Settings(db_path=tmp_path / "app.db"), schema=_synthetic_schema(),
+                     client=LLMClient(sdk_client=refusing),
+                     validation_client=LLMClient(sdk_client=refusing, model=VALIDATION_MODEL))
+    client = TestClient(app)
+
+    streamed = _events(_stream(client, "How many orders were cancelled?"))
+    assert [stage for stage, _ in streamed][-1] == "done", "the client never sees the refusal"
+    done = streamed[-1][1]["payload"]
+    assert done["mode"] == "demo" and done["mode_reason"] == "model_unavailable" and done["outcome"] == "answered"
+    assert len(refusing.calls) == 1
+    assert app.state.qg.store._reserved == set()
+
+    assert client.get("/healthz").json()["mode_reason"] == "model_unavailable"
+    again = client.post("/v1/query", json={"question": "How many orders were cancelled?"}).json()
+    assert again["mode_reason"] == "model_unavailable"
+    assert len(refusing.calls) == 1, "while the key is known bad, the model is not tried again"
+
+
+def test_a_missing_key_means_demo_mode_not_an_error(tmp_path, live_database, monkeypatch) -> None:
+    import queryguard.api.app as app_module
+
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(app_module, "load_env", lambda: None)  # .env would supply a key locally
+    client = TestClient(create_app(Settings(db_path=tmp_path / "app.db"), schema=_synthetic_schema()))
+    assert client.get("/healthz").json()["mode_reason"] == "model_unavailable"
+    done = client.post("/v1/query", json={"question": "How many orders were cancelled?"}).json()
+    assert done["mode"] == "demo" and done["mode_reason"] == "model_unavailable"
+    # conftest makes constructing a real anthropic.Anthropic fail the test, so none was built.
+
+
+# ----------------------------------------------------------------- warm-up
+
+
+def test_warm_is_free_unlimited_and_once_per_instance(tmp_path, live_database) -> None:
+    client, fake = _client(tmp_path, _answer(COUNT_SQL), rate_per_minute=1)
+    first = client.post("/v1/warm").json()
+    assert first["warmed"] is True
+    for _ in range(5):
+        assert client.post("/v1/warm").json() == {"warmed": False, "elapsed_ms": 0}
+    assert fake.calls == [], "no model call"
+    assert client.post("/v1/query", json={"question": "How many orders were cancelled?"}).status_code == 200, \
+        "warm-ups do not use the rate limit"

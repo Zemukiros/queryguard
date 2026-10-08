@@ -182,3 +182,18 @@ def test_a_demo_answer_never_loads_the_anthropic_sdk(tmp_path, live_database) ->
     assert loaded["mode"] == "demo"
     assert "anthropic" not in loaded["answer"]
     assert {"pandas", "sqlalchemy", "psycopg"} <= set(loaded["answer"]), "a demo answer still runs real SQL"
+
+
+def test_warm_loads_what_the_first_question_needs_but_not_the_sdk(tmp_path, live_database) -> None:
+    probe = _PROBE.replace('if sys.argv[1] == "ask":', 'if sys.argv[1] == "warm":\n    client.post("/v1/warm")\n    loaded["warm"] = [m for m in heavy if m in sys.modules]\nif sys.argv[1] == "ask":')
+    import os
+    import subprocess
+    import sys as _sys
+
+    repo = Path(__file__).resolve().parent.parent
+    env = {**os.environ, "QUERYGUARD_APP_DB": str(tmp_path / "app.db"), "PYTHONPATH": str(repo), "QUERYGUARD_FAKE_LLM": "1"}
+    out = subprocess.run([_sys.executable, "-c", probe, "warm"], cwd=repo, env=env, capture_output=True, text=True, check=True)
+    loaded = json.loads(out.stdout.strip().splitlines()[-1])
+    assert loaded["healthz"] == []
+    assert {"pandas", "sqlalchemy", "psycopg", "sqlparse"} <= set(loaded["warm"])
+    assert "anthropic" not in loaded["warm"], "a demo deployment never needs the SDK"

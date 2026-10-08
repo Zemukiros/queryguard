@@ -3,7 +3,9 @@ import { expect, test, type Page } from "@playwright/test";
 const timelineRow = (page: Page, stage: string) => page.locator(`[data-testid=timeline] [data-stage=${stage}]`);
 
 test.beforeEach(async ({ page }) => {
+  const warm = page.waitForRequest((request) => request.url().endsWith("/v1/warm") && request.method() === "POST");
   await page.goto("/");
+  await warm; // the page warms a cold instance on load
   await expect(page.getByTestId("mode-badge")).toHaveAttribute("data-reason", "demo_deployment");
 });
 

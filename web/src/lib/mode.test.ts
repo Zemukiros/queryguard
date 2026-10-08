@@ -6,7 +6,8 @@ describe("mode copy", () => {
     expect(modeCopy("call_cap", 1800).label).toBe("Demo mode · today's live limit is reached, resets in 30 min");
     expect(modeCopy("switched_off").label).toBe("Demo mode · live answers are off");
     expect(modeCopy("demo_deployment").label).toBe("Demo mode · simulated model · $0");
-    for (const reason of ["budget", "call_cap", "switched_off", "demo_deployment"] as const) {
+    expect(modeCopy("model_unavailable").label).toBe("Demo mode · the live model is unavailable");
+    for (const reason of ["budget", "call_cap", "switched_off", "demo_deployment", "model_unavailable"] as const) {
       expect(modeCopy(reason).detail).toContain("Nothing is spent");
     }
   });
