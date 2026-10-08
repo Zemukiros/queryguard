@@ -21,6 +21,17 @@ would and flag shapes that are rarely correct:
                         table's row count, which only a fan-out join can reach
 - duplicate_rows        exact duplicate rows despite a primary key column and
                         no DISTINCT, the other signature of a fan-out join
+- revenue_status        a revenue or spend total that sums orders.total_amount
+                        without a status filter excluding pending and
+                        cancelled orders, which the metric glossary says are
+                        not revenue
+
+The last one reads the SQL, not the rows. Every validator that compares the
+SQL with the *question* passed refund_04 in live-2026-10-01 (gross revenue
+that included unpaid orders): the question never says "exclude pending", so
+a query that forgets to is a faithful translation of it. Only a stated
+business rule catches that, so this check applies the glossary's revenue
+definition directly.
 
 Every range comes from the schema profile in `schema_cache.json`, never from a
 number written here, so the checks follow the data when it is re-seeded. The
@@ -61,6 +72,7 @@ CHECK_DATE_SPAN = "date_out_of_span"
 CHECK_NEGATIVE = "negative_values"
 CHECK_AGGREGATE = "implausible_aggregate"
 CHECK_DUPLICATES = "duplicate_rows"
+CHECK_REVENUE_STATUS = "revenue_status"
 
 # Above this fraction a column counts as NULL-heavy. Below the row minimum one
 # NULL is already a large fraction and means nothing.
@@ -105,6 +117,24 @@ _NOT_AN_ALIAS = frozenset(
 _DATE_TRUNC = re.compile(r"date_trunc\s*\(\s*'(\w+)'", re.IGNORECASE)
 _TRUNC_ORDER = ("day", "week", "month", "quarter", "year")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+# The metric glossary (db/init/04_comments.sql on orders.total_amount, and the
+# system prompt): revenue sums total_amount over these statuses only.
+REVENUE_STATUSES = ("paid", "shipped", "delivered", "refunded")
+NOT_REVENUE_STATUSES = ("pending", "cancelled")
+_REVENUE_RULE = (
+    "revenue = sum(orders.total_amount) for status IN ('paid', 'shipped', "
+    "'delivered', 'refunded'); pending and cancelled orders are not revenue"
+)
+# Words in the question or an output name that make a total a revenue/spend figure.
+_REVENUE_WORDS = re.compile(
+    r"\b(revenue|sales|spend|spent|spending|earned|earnings|income|turnover)\b", re.IGNORECASE
+)
+_STATUS_PREDICATE = re.compile(
+    r"(?:\b\w+\.)?\bstatus\s*(=|<>|!=|\bNOT\s+IN\b|\bIN\b)\s*(\([^)]*\)|'(?:[^']|'')*')",
+    re.IGNORECASE,
+)
+_QUOTED = re.compile(r"'((?:[^']|'')*)'")
 
 
 @dataclass(frozen=True)
@@ -742,6 +772,57 @@ def _check_duplicates(ctx: _Context) -> list[SanityFlag]:
     )]
 
 
+def _sums_total_amount(ctx: _Context) -> str | None:
+    """The output name of the sum over total_amount, '' if it is nested, None if absent."""
+    for function in _functions(ctx.statement):
+        if (function.get_name() or "").lower() != "sum":
+            continue
+        if any(t.ttype in T.Name and t.value.lower() == "total_amount" for t in function.flatten()):
+            for col in ctx.columns:
+                if col.output.aggregate == "sum" and (col.output.column or "").lower() == "total_amount":
+                    return col.name
+            return ""
+    return None
+
+
+def _statuses_kept(filters: str) -> set[str]:
+    """Which of NOT_REVENUE_STATUSES the WHERE/HAVING status predicates still let through.
+
+    Predicates are read as if ANDed together. Under an OR that overstates what is
+    excluded, so the check can miss a query, never flag a correct one.
+    """
+    kept = set(NOT_REVENUE_STATUSES)
+    for op, operand in _STATUS_PREDICATE.findall(filters):
+        values = {v.replace("''", "'") for v in _QUOTED.findall(operand)}
+        op = " ".join(op.upper().split())
+        if op in {"=", "IN"}:
+            kept &= values
+        else:  # <>, !=, NOT IN
+            kept -= values
+    return kept
+
+
+def _check_revenue_status(ctx: _Context) -> list[SanityFlag]:
+    if not re.search(r"\b(?:FROM|JOIN)\s+(?:\w+\.)?orders\b", ctx.sql, re.IGNORECASE):
+        return []
+    output = _sums_total_amount(ctx)
+    if output is None:
+        return []
+    names = " ".join(c.name for c in ctx.columns)
+    if not (_REVENUE_WORDS.search(ctx.question) or _REVENUE_WORDS.search(names.replace("_", " "))):
+        return []
+    kept = _statuses_kept(_filter_text(ctx.statement))
+    if not kept:
+        return []
+    statuses = " and ".join(f"'{s}'" for s in NOT_REVENUE_STATUSES if s in kept)
+    return [SanityFlag(
+        CHECK_REVENUE_STATUS, WARN,
+        f"The query sums orders.total_amount as a revenue or spend total, but no status "
+        f"filter excludes {statuses} orders. Glossary: {_REVENUE_RULE}.",
+        output or None,
+    )]
+
+
 _CHECKS = (
     _check_empty,
     _check_null_heavy,
@@ -750,6 +831,7 @@ _CHECKS = (
     _check_negative,
     _check_aggregates,
     _check_duplicates,
+    _check_revenue_status,
 )
 
 

@@ -2,6 +2,7 @@
 
     uv run python -m evals.run_eval                       # dry run, fake client, no spend
     uv run python -m evals.run_eval --live --run-id ID    # real API; re-run the same ID to resume
+    uv run python -m evals.run_eval --live --run-id ID --category refund_trap --population generated --population mutation
 
 Three populations, interleaved so a run stopped early still has all three:
 
@@ -116,6 +117,16 @@ class Item:
     sql: str | None = None  # mutation and golden populations
     mutation: str | None = None
     expected_outcome: str | None = None  # ambiguous / unanswerable generated items
+
+
+def select_items(
+    items: list[Item], categories: list[str] | None = None, populations: list[str] | None = None
+) -> list[Item]:
+    """A targeted re-run's subset, in build_items order. None keeps everything."""
+    return [
+        i for i in items
+        if (not categories or i.category in categories) and (not populations or i.population in populations)
+    ]
 
 
 def build_items() -> list[Item]:
@@ -655,6 +666,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-cost", type=float, default=DEFAULT_MAX_COST_USD)
     parser.add_argument("--concurrency", type=int, default=DEFAULT_CONCURRENCY)
     parser.add_argument("--limit", type=int, help="only the first N items (smoke tests)")
+    parser.add_argument("--category", action="append", help="only this golden category (repeatable)")
+    parser.add_argument("--population", action="append", choices=(GENERATED, MUTATION, GOLDEN),
+                        help="only this population (repeatable)")
     args = parser.parse_args(argv)
 
     if args.live and not args.run_id:
@@ -692,7 +706,10 @@ def main(argv: list[str] | None = None) -> int:
         load_env()
         sdk = anthropic.Anthropic(max_retries=5)  # SDK backoff on 429/5xx, honouring retry-after
 
-    items = build_items()[: args.limit] if args.limit else build_items()
+    items = select_items(build_items(), args.category, args.population)
+    if args.category and not items:
+        parser.error(f"no items in categories {args.category}")
+    items = items[: args.limit] if args.limit else items
     ctx = Context(run_id, dry_run, sdk, budget, load_schema(), golden_frames(), results_path)
     print(f"{'DRY RUN' if dry_run else 'LIVE'} {run_id}: {len(items)} items, "
           f"{len(finished_ids(results_path))} already finished")

@@ -186,6 +186,8 @@ def detector_table(fit: list[dict], calibrated: np.ndarray, v0: np.ndarray) -> l
 
     table = []
     for name, members in groups:
+        if not members:  # e.g. no wrong generated answers left after a fix
+            continue
         row = {"group": name, "n": len(members)}
         for d in DETECTORS:
             row[d] = sum(r["detectors"][d]["flagged"] for r in members) / len(members)

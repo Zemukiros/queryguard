@@ -6,6 +6,11 @@
 -- order from a refunded one, writes plausible SQL that returns the wrong number.
 -- So every business term that could be read two ways is pinned down here.
 --
+-- The metric glossary (what revenue and net revenue are) lives on
+-- orders.total_amount, the column every revenue query sums; the system prompt
+-- repeats it in its glossary section. Added after live-2026-10-01, where
+-- refund_04 summed unpaid pending orders into gross revenue.
+--
 -- COMMENT ON is idempotent, so this file can be re-applied to a running database
 -- without a full rebuild:  psql -U queryguard -d queryguard -f db/init/04_comments.sql
 
@@ -67,7 +72,9 @@ COMMENT ON COLUMN orders.order_date IS
 COMMENT ON COLUMN orders.status IS
     'pending=unpaid, paid=awaiting shipment, shipped=in transit, delivered=received, cancelled=voided before payment, refunded=money returned.';
 COMMENT ON COLUMN orders.total_amount IS
-    'Sum of line items after discount. Zero for cancelled. Not reduced by refunds.';
+    'Sum of line items after discount. Zero for cancelled. Not reduced by refunds. '
+    'Revenue (gross) = sum(total_amount) WHERE status IN (''paid'',''shipped'',''delivered'',''refunded''); '
+    'pending and cancelled orders are NOT revenue. Net revenue = that minus refunds.amount on those orders.';
 COMMENT ON COLUMN orders.currency IS
     'ISO currency code for total_amount. Always USD in this dataset.';
 COMMENT ON COLUMN orders.shipping_address IS
@@ -97,7 +104,8 @@ COMMENT ON TABLE refunds IS
 COMMENT ON COLUMN refunds.order_item_id IS
     'The refunded line item. NULL means a whole-order refund.';
 COMMENT ON COLUMN refunds.amount IS
-    'Equals orders.total_amount when is_partial is false, else 10-60% of it.';
+    'Equals orders.total_amount when is_partial is false, else 10-60% of it. '
+    'Net revenue subtracts this from gross revenue (see orders.total_amount).';
 COMMENT ON COLUMN refunds.reason IS
     'Customer-stated reason. NULL means not recorded.';
 COMMENT ON COLUMN refunds.refunded_at IS

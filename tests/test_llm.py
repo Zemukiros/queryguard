@@ -185,6 +185,13 @@ def test_rendered_schema_appears_verbatim_in_the_system_prompt() -> None:
     assert "∈ {alpha, beta}" in blocks[1]["text"]
 
 
+def test_system_prompt_states_the_revenue_glossary() -> None:
+    instructions = build_system_blocks(_synthetic_schema())[0]["text"]
+    assert "Glossary" in instructions
+    assert "status IN ('paid', 'shipped', 'delivered', 'refunded')" in instructions
+    assert "Net revenue: gross revenue minus refunds.amount" in instructions
+
+
 def test_system_prompt_is_stable_across_questions() -> None:
     """The cached prefix must not vary, or every call is a cache miss."""
     schema = _synthetic_schema()

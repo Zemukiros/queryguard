@@ -26,6 +26,7 @@ from evals.run_eval import (
     TransientFailure,
     _transient_errors,
     build_items,
+    select_items,
     finished_ids,
     golden_frames,
     label_generated,
@@ -55,6 +56,15 @@ def test_all_three_populations_are_built_and_interleaved() -> None:
     assert [i.population for i in items[:3]] == [GENERATED, MUTATION, GOLDEN], "a run stopped early stays balanced"
     assert all(i.sql for i in items if i.population != GENERATED)
     assert all(i.mutation for i in items if i.population == MUTATION)
+
+
+def test_a_targeted_rerun_selects_by_category_and_population() -> None:
+    items = select_items(build_items(), ["refund_trap"], [GENERATED, MUTATION])
+    assert {i.category for i in items} == {"refund_trap"}
+    assert {i.population for i in items} == {GENERATED, MUTATION}
+    assert sum(i.population == GENERATED for i in items) == 6
+    assert "mut:refund_04__drop_where" in {i.id for i in items}
+    assert select_items(build_items()) == build_items()
 
 
 # --------------------------------------------------------------- token profile
@@ -324,3 +334,46 @@ def test_recompute_fixes_agreement_features_and_confidence_offline(live_database
     assert fixed["confidence"] > before
     assert fixed["corrections"]["agreement"]["outcome"] == "incomparable"
     assert row["detectors"]["agreement"]["outcome"] == "incomparable", "the input row is not mutated"
+
+
+def test_recompute_applies_a_new_sanity_rule_to_old_rows(live_database) -> None:
+    """refund_04's drop_where mutation passed every sanity check in live-2026-10-01."""
+    from evals.recompute import recompute_row
+    from queryguard.schema.introspect import load_schema
+    from queryguard.validation.confidence import Features, score
+
+    features = dict(
+        executed=True, self_confidence=0.9, alignment=1.0, discrepancy_count=0, sanity_fail=0,
+        sanity_warn=0, sanity_info=0, agreement="agree", guardrail_rewrote=True, row_count_bucket="1",
+    )
+    before, _ = score(Features(**features))
+    row = {
+        "id": "mut:refund_04__drop_where", "population": MUTATION,
+        "question": "What was gross revenue from orders placed in 2025, before refunds?",
+        "sql": "SELECT sum(o.total_amount) AS gross_revenue FROM orders AS o "
+               "WHERE o.order_date >= DATE '2025-01-01' AND o.order_date < DATE '2026-01-01'",
+        "outcome": "executed", "label": "wrong", "label_reason": "known mutation",
+        "features": features, "confidence": before, "confidence_breakdown": {},
+        "detectors": {"sanity": {"fail": 0, "warn": 0, "info": 0, "checks": [], "flagged": False}},
+    }
+    item = Item(row["id"], MUTATION, "refund_trap", row["question"], "refund_04")
+    fixed = recompute_row(row, item, {}, load_schema())
+
+    assert fixed["detectors"]["sanity"]["checks"] == ["warn:revenue_status"]
+    assert fixed["detectors"]["sanity"]["flagged"] is True
+    assert fixed["features"]["sanity_warn"] == 1
+    assert fixed["confidence"] < before
+    assert fixed["corrections"]["sanity"]["flagged"] is False
+
+
+def test_merge_replaces_rerun_rows_and_rejects_unknown_ids() -> None:
+    from evals.merge import merge
+
+    base = [{"id": "gen:a", "label": "wrong"}, {"id": "gen:b", "label": "correct"}]
+    merged = merge(base, [{"id": "gen:a", "label": "correct"}], "old", "new")
+    assert merged == [
+        {"id": "gen:a", "label": "correct", "source_run": "new"},
+        {"id": "gen:b", "label": "correct", "source_run": "old"},
+    ]
+    with pytest.raises(SystemExit):
+        merge(base, [{"id": "gen:zzz"}], "old", "new")

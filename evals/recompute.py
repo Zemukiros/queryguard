@@ -15,9 +15,11 @@ What is recomputed:
 - agreement outcome and explanation, via evaluate_second_sql (same guardrail,
   executor and compare_results as the live pipeline);
 - the feature vector's `agreement` field, and the v0 confidence from it;
-- labels of answerable generated items, via compare_to_golden.
-Alignment, sanity flags and everything else are left as they were: their
-rules did not change, and alignment cannot be recomputed without the API.
+- labels of answerable generated items, via compare_to_golden;
+- sanity flags and the feature vector's sanity counts, via check_result on the
+  re-executed SQL (added with the revenue_status check, 2026-10-08).
+Alignment and everything else are left as they were: alignment cannot be
+recomputed without the API.
 """
 
 from __future__ import annotations
@@ -28,14 +30,34 @@ import sys
 from collections import Counter
 
 from evals.common import run_guarded
+from queryguard.guardrails import check
 from evals.run_eval import GENERATED, GOLDEN, MUTATION, RESULTS_DIR, build_items, compare_to_golden, golden_frames
 from queryguard.validation.agreement import AGREE, evaluate_second_sql
+from queryguard.schema.introspect import DatabaseSchema, load_schema
 from queryguard.validation.confidence import V0_WEIGHTS, Features, score
+from queryguard.validation.sanity import check_result
 
 DETECTORS = ("sanity", "alignment", "agreement")
 
 
-def recompute_row(row: dict, item, frames: dict) -> dict:
+def _recompute_sanity(row: dict, first, schema: DatabaseSchema, corrections: dict) -> None:
+    """Re-run the sanity checks on the SQL the pipeline executed (guardrail-rewritten)."""
+    if first.execution is None or not first.execution.ok:
+        return
+    flags = check_result(row["question"], check(row["sql"]).sql_to_execute, first.execution, schema)
+    severities = Counter(f.severity for f in flags)
+    sanity = {
+        "fail": severities["fail"], "warn": severities["warn"], "info": severities["info"],
+        "checks": [f"{f.severity}:{f.check}" for f in flags],
+        "flagged": severities["fail"] + severities["warn"] > 0,
+    }
+    if sanity != row["detectors"]["sanity"]:
+        corrections["sanity"] = row["detectors"]["sanity"]
+        row["detectors"]["sanity"] = sanity
+        row["features"].update(sanity_fail=sanity["fail"], sanity_warn=sanity["warn"], sanity_info=sanity["info"])
+
+
+def recompute_row(row: dict, item, frames: dict, schema: DatabaseSchema | None = None) -> dict:
     row = json.loads(json.dumps(row))  # deep copy
     corrections: dict = {}
     agreement = (row.get("detectors") or {}).get("agreement")
@@ -58,6 +80,10 @@ def recompute_row(row: dict, item, frames: dict) -> dict:
         if label != row["label"]:
             corrections["label"] = {"label": row["label"], "label_reason": row["label_reason"]}
         row["label"], row["label_reason"] = label, reason
+
+    if schema is not None and row.get("features") and row.get("sql") and (row.get("detectors") or {}).get("sanity"):
+        first = first or run_guarded(row["sql"])
+        _recompute_sanity(row, first, schema, corrections)
 
     if row.get("features"):
         confidence, breakdown = score(Features(**row["features"]), V0_WEIGHTS)
@@ -126,7 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     items = {i.id: i for i in build_items()}
     frames = golden_frames()
 
-    corrected = [recompute_row(row, items[row["id"]], frames) for row in raw]
+    schema = load_schema()
+    corrected = [recompute_row(row, items[row["id"]], frames, schema) for row in raw]
     target.write_text("".join(json.dumps(r, default=str, sort_keys=True) + "\n" for r in corrected), encoding="utf-8")
     print(f"wrote {target.relative_to(RESULTS_DIR.parent.parent)} ({len(corrected)} rows)\n")
     summarise(raw, corrected)

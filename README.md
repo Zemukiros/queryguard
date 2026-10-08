@@ -37,9 +37,11 @@ queries). The full write-up is in [docs/EVAL_RESULTS.md](docs/EVAL_RESULTS.md).
 | Brier score (out-of-fold, grouped 5-fold CV) | **0.053** (hand-set v0: 0.067) |
 | Spend for the whole run | $2.11 logged, 586 API calls |
 
-**Known limitation:** `refund_04`. "Gross revenue before refunds" was answered including unpaid orders.
-Every check passed it, because all three test whether the SQL matches the *question*, and none knows the
-*business rule*. See [Known limitations](docs/EVAL_RESULTS.md#known-limitations).
+**Fixed after the first eval:** `refund_04`. "Gross revenue before refunds" was answered including unpaid orders,
+and every check passed it. None of the checks knew the *business rule*. A stated revenue glossary and a
+`revenue_status` sanity check fixed it. In a targeted re-run (69 calls, $0.28), refund generation went from 5/6 to
+6/6, and both mutations that had slipped through are now caught. See
+[Fixed after first eval](docs/EVAL_RESULTS.md#fixed-after-first-eval), including what the fix made worse.
 
 ## Architecture
 

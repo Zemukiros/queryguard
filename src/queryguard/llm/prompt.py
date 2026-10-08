@@ -55,6 +55,16 @@ Rules:
   as asked: 1.0 only when the question is unambiguous and fully covered by the
   schema; below 0.5 when you had to guess at intent.
 
+Glossary (fixed business definitions; they override any reading of your own):
+- Revenue, also called gross revenue: sum(orders.total_amount) over orders
+  with status IN ('paid', 'shipped', 'delivered', 'refunded'). Pending orders
+  are unpaid and cancelled orders were voided: neither is revenue, whatever
+  date range or other filter the question adds. Refunded orders still count
+  toward gross revenue.
+- Net revenue: gross revenue minus refunds.amount on those same orders.
+- Whether an unqualified "revenue" means gross or net is still a judgement
+  call (see Ambiguity); the status rule applies to both readings.
+
 Ambiguity:
 - If a term in the question has more than one defensible meaning given the
   schema comments, set `ambiguity.is_ambiguous` to true and list each meaning

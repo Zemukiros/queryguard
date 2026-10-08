@@ -29,6 +29,7 @@ from queryguard.validation.sanity import (
     CHECK_EMPTY,
     CHECK_NEGATIVE,
     CHECK_NULL_HEAVY,
+    CHECK_REVENUE_STATUS,
     FAIL,
     INFO,
     WARN,
@@ -502,6 +503,77 @@ def test_a_foreign_key_column_is_not_a_primary_key(schema) -> None:
     frame = pd.DataFrame({"order_id": pd.Series([7, 7], dtype="int64"), "product_id": pd.Series([3, 3], dtype="int64")})
     sql = "SELECT oi.order_id, oi.product_id FROM order_items AS oi"
     assert _only(_flags(schema, frame, sql), CHECK_DUPLICATES) == []
+
+
+# ------------------------------------------------------------ revenue status
+
+
+def _one_total(name: str = "gross_revenue") -> pd.DataFrame:
+    return pd.DataFrame({name: [Decimal("6177714.13")]})
+
+
+_GROSS_2025 = (
+    "SELECT sum(o.total_amount) AS gross_revenue FROM orders AS o "
+    "WHERE {status}o.order_date >= DATE '2025-01-01' AND o.order_date < DATE '2026-01-01'"
+)
+_GROSS_Q = "What was gross revenue from orders placed in 2025, before refunds?"
+
+
+def test_revenue_without_a_status_filter_is_flagged_with_the_glossary_rule(schema) -> None:
+    # refund_04 as generated in live-2026-10-01: every 2025 order, pending included.
+    flags = _only(_flags(schema, _one_total(), _GROSS_2025.format(status=""), _GROSS_Q), CHECK_REVENUE_STATUS)
+    assert len(flags) == 1
+    assert flags[0].severity == WARN
+    assert flags[0].column == "gross_revenue"
+    assert "'pending' and 'cancelled'" in flags[0].explanation
+    assert "pending and cancelled orders are not revenue" in flags[0].explanation
+
+
+def test_a_status_filter_dropped_inside_a_cte_is_still_flagged(schema) -> None:
+    # refund_01's drop_where mutation: the sum reads the CTE, the CTE reads orders.
+    sql = (
+        "WITH paid_orders AS (SELECT o.order_id, o.total_amount FROM orders AS o "
+        "WHERE o.order_date >= DATE '2025-01-01' AND o.order_date < DATE '2026-01-01') "
+        "SELECT (SELECT sum(po.total_amount) FROM paid_orders AS po) - (SELECT coalesce(sum(r.amount), 0) "
+        "FROM refunds AS r JOIN paid_orders AS po ON po.order_id = r.order_id) AS net_revenue"
+    )
+    frame = _one_total("net_revenue")
+    flags = _only(_flags(schema, frame, sql, "What was net revenue from orders placed in 2025, after refunds?"),
+                  CHECK_REVENUE_STATUS)
+    assert len(flags) == 1
+
+
+@pytest.mark.parametrize("status", [
+    "o.status IN ('paid', 'shipped', 'delivered', 'refunded') AND ",
+    "o.status = 'delivered' AND ",
+    "o.status NOT IN ('pending', 'cancelled') AND ",
+    "o.status <> 'pending' AND o.status != 'cancelled' AND ",
+])
+def test_a_filter_excluding_pending_and_cancelled_is_not_flagged(schema, status) -> None:
+    flags = _flags(schema, _one_total(), _GROSS_2025.format(status=status), _GROSS_Q)
+    assert _only(flags, CHECK_REVENUE_STATUS) == []
+
+
+def test_excluding_only_cancelled_still_flags_pending(schema) -> None:
+    sql = _GROSS_2025.format(status="o.status <> 'cancelled' AND ")
+    flags = _only(_flags(schema, _one_total(), sql, _GROSS_Q), CHECK_REVENUE_STATUS)
+    assert len(flags) == 1
+    assert "'pending' orders" in flags[0].explanation
+
+
+def test_a_total_that_is_not_called_revenue_is_left_alone(schema) -> None:
+    # date_02: "total order amount" is every order's amount, by the question's own words.
+    sql = ("SELECT sum(o.total_amount) AS total FROM orders AS o "
+           "WHERE o.order_date >= DATE '2026-03-01' AND o.order_date < DATE '2026-04-01'")
+    flags = _flags(schema, _one_total("total"), sql,
+                   "What was the total order amount for orders placed in March 2026?")
+    assert _only(flags, CHECK_REVENUE_STATUS) == []
+
+
+def test_a_revenue_sum_over_another_column_is_left_alone(schema) -> None:
+    sql = "SELECT sum(r.amount) AS refunded_revenue FROM refunds AS r"
+    flags = _flags(schema, _one_total("refunded_revenue"), sql, "How much revenue was refunded?")
+    assert _only(flags, CHECK_REVENUE_STATUS) == []
 
 
 # ------------------------------------------------------------------ overall

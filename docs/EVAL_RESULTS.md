@@ -7,9 +7,12 @@ The calibration was fitted and scored offline from that run. Calibrating made no
 uv run python -m evals.calibrate --run-id live-2026-10-01   # refit, rescore, redraw: free, no DB, no API
 ```
 
-Outputs: `src/queryguard/validation/calibration.json` (runtime weights),
-`evals/results/live-2026-10-01.calibration.json` (every metric below, plus each row's out-of-fold score) and
-`docs/calibration.png`.
+Outputs: `evals/results/live-2026-10-01.calibration.json` (every metric in sections 2–4, plus each row's
+out-of-fold score).
+
+**The refund_04 blind spot has since been fixed and re-measured.** See [Fixed after first eval](#fixed-after-first-eval).
+The runtime weights (`src/queryguard/validation/calibration.json`) and `docs/calibration.png` now come from the
+merged run `merged-2026-10-08`. Sections 1–5 still describe `live-2026-10-01` as recorded.
 
 ## The run
 
@@ -111,6 +114,9 @@ what v0 gave it, and "incomparable" is treated as close to a disagreement.
 
 ![Reliability diagram: v0 vs calibrated vs perfect calibration](calibration.png)
 
+*(The diagram has been redrawn from the merged run, see [Fixed after first eval](#fixed-after-first-eval). The
+numbers in this section are the original fit's.)*
+
 The calibrated score is the better probability: Brier is 20% lower and ECE 22% lower, and at the 0.5 threshold
 it catches 5 more wrong answers. v0 is slightly better at *ranking* (AUROC 0.969 vs 0.957) and raises one fewer
 false flag. The extra false flag is gold:refund_06, at 0.38. Scores are bimodal: 156 of 184 fall below 0.2 or
@@ -161,9 +167,96 @@ totals. The first pass also made 4 unlogged calls (about $0.07), in the unanswer
 parse before commit 0ec0b33. True spend was about 590 calls and **about $2.18**. Latency is the wall-clock time of the
 whole pipeline call for an item, API calls and query execution included.
 
+## Fixed after first eval
+
+### What changed (2026-10-08)
+
+The fix states the business rule. It adds no validator signal. Two places:
+
+1. **A metric glossary.** Revenue (gross) = `sum(orders.total_amount)` for
+   `status IN ('paid','shipped','delivered','refunded')`. Pending and cancelled orders are **not** revenue. Net revenue
+   also subtracts `refunds.amount`. The rule is in the schema comment on `orders.total_amount` (`db/init/04_comments.sql`,
+   re-applied to the running database, `COMMENT ON` is idempotent), so it reaches every prompt through the
+   introspected schema. It is also in a new **Glossary** section of the system prompt (`llm/prompt.py`). Unqualified
+   "revenue" is still a gross-or-net judgement call, and "spent" is left undefined, so the ambiguous questions keep
+   their forks. No few-shot example was added.
+2. **A `revenue_status` sanity check** (`validation/sanity.py`, warn). It fires when a revenue or spend total sums
+   `orders.total_amount` and no status filter excludes `pending` and `cancelled`. The flag quotes the glossary rule.
+   It reads the SQL, not the rows, because the rows of a wrong revenue total look like any other number.
+
+### Re-run: `refund-fix-2026-10-08`
+
+Only the refund category went back through the live pipeline: its 6 questions and their 15 mutations, under the new
+prompt and schema. The golden refund SQLs were not re-run.
+
+```bash
+uv run python -m evals.run_eval --live --run-id refund-fix-2026-10-08 --category refund_trap \
+    --population generated --population mutation --max-calls 75 --max-cost 0.50 --concurrency 1
+```
+
+21 items, **69 calls, $0.283** from the ledger `evals/results/refund-fix-2026-10-08.llm_calls.jsonl`, under caps of
+75 calls and $0.50. The dry-run projection was 69 calls (worst case, every step) and $0.25.
+
+The sanity check is deterministic, so `evals.recompute` now also re-derives sanity flags offline. It was applied to
+all 194 rows of `live-2026-10-01` at no cost. It flags exactly 3 rows: gen:refund_04 and the two `drop_where`
+mutations. All 3 are wrong. It flags none of the 80 correct answers.
+
+### Before / after
+
+| item | | alignment | agreement | sanity | v0 | calibrated (OOF) | label |
+|---|---|---|---|---|---|---|---|
+| gen:refund_04 | before | 1.0 | agree | — | 0.94 | 0.96 | **wrong**: $6,177,714.13, pending orders included |
+| | after | 0.6 (flagged) | agree | — | 0.76 | 0.88 | **correct**: the golden SQL, status for status |
+| mut:refund_01__drop_where | before | 1.0 | agree | — | 0.94 | 0.94 | wrong, **missed** |
+| | after | 0.4 | disagree | revenue_status | 0.04 | 0.02 | wrong, **caught** by all 3 detectors |
+| mut:refund_04__drop_where | before | 1.0 | agree | — | 0.94 | 0.96 | wrong, **missed** |
+| | after | 1.0 | disagree | revenue_status | 0.28 | 0.10 | wrong, **caught** by agreement and sanity |
+
+- **refund_04 is correct.** The model applied the glossary's status filter. Refund generation is now **6/6**
+  (was 5/6).
+- **Both `drop_where` mutations are caught**, by two independent routes. The new sanity check flags them. The second
+  query now applies the glossary on its own, so it disagrees with the mutated SQL. Before the fix it repeated the
+  same mistake and agreed.
+- **The other 13 refund mutations** stay caught under the calibrated score (all below 0.27). Under v0 they are all below
+  0.5 too. mut:refund_06__fan_out_join was a v0 miss before (0.81) and is 0.44 now.
+
+### Recalibrated on the merged run
+
+`evals.merge` builds `merged-2026-10-08`: the 194 `live-2026-10-01` rows, with the 21 re-run items replaced by their
+new rows. `evals.calibrate` was refitted on it. Same method, same `C`, same grouped folds.
+
+| fit | scorer | Brier ↓ | ECE ↓ | AUROC ↑ | wrong < 0.5 ↑ | false flags ↓ |
+|---|---|---|---|---|---|---|
+| live-2026-10-01 | v0 hand-set | 0.067 | 0.094 | 0.969 | 92.4% (97/105) | 3.8% (3/79) |
+| live-2026-10-01 | calibrated | 0.053 | 0.073 | 0.957 | 97.1% (102/105) | 5.1% (4/79) |
+| merged-2026-10-08 | v0 hand-set | 0.050 | 0.117 | 0.988 | 96.2% (100/104) | 3.8% (3/80) |
+| merged-2026-10-08 | **calibrated (now at runtime)** | **0.035** | **0.068** | **0.984** | **99.0% (103/104)** | 5.0% (4/80) |
+
+**These rows are not a like-for-like improvement.** The fitting set changed under the fix. Its only organic wrong
+answer (refund_04) is now correct, so all 104 wrong rows are mutations, and the three rows that scored 0.94–0.96
+while wrong are now resolved. Most of the gain in Brier and AUROC is those three rows. Self-confidence is still dropped
+(gain 0.00004, needs > 0.005). The weights moved modestly. Agreement and discrepancies count for more (agree +2.07 →
++2.65, discrepancy −0.42 → −0.77), and a sanity warning now costs −0.82 (was −0.66).
+
+### What the fix made worse, or left open
+
+- **The alignment judge now false-flags the correct refund_04 (0.6).** Its discrepancy reads: *"original asks for gross
+  revenue from all orders … the query filters to only … paid, shipped, delivered, or refunded"*. The judge compares
+  the question with the back-translation, and it is never shown the schema or the glossary, so it treats the business
+  rule as a deviation. Agreement keeps the score at 0.88, but the detector itself is wrong here. Next fix: give the
+  judge the glossary.
+- **One mutation slipped back over the line.** mut:topn_04__fan_out_join (not a refund item, not re-run) moved from
+  0.497 to 0.594 under the refitted weights. Its only signal is an `incomparable` agreement. It sat on the threshold
+  before, and it now sits just above it.
+- gold:refund_06 is still a calibrated false flag (0.38 → 0.48).
+- **Only the refund category was re-run under the new prompt.** The other 44 generated answers, and every golden
+  and non-refund mutation row, were scored under the old prompt. A glossary in every prompt could change those
+  answers as well (ambig_01 asks about "revenue"), and this run does not measure that. The merged set mixes two
+  prompt versions.
+
 ## Known limitations
 
-- **refund_04: a business-rule blind spot.** For "gross revenue from orders placed in 2025, before refunds",
+- **refund_04: a business-rule blind spot** *(fixed; see [Fixed after first eval](#fixed-after-first-eval))*. For "gross revenue from orders placed in 2025, before refunds",
   the model summed every 2025 order, including unpaid `pending` ones: $6,177,714.13 against the golden
   $5,791,881.33. Every detector passed it: alignment 1.0, the second query made the same choice and agreed,
   and no sanity flag fired. The answer scores 0.94 under v0 and 0.96 calibrated. Two `drop_where` mutations
