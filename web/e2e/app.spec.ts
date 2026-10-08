@@ -4,7 +4,7 @@ const timelineRow = (page: Page, stage: string) => page.locator(`[data-testid=ti
 
 test.beforeEach(async ({ page }) => {
   await page.goto("/");
-  await expect(page.getByTestId("fake-badge")).toBeVisible();
+  await expect(page.getByTestId("mode-badge")).toHaveAttribute("data-reason", "demo_deployment");
 });
 
 test("a question streams through every stage and renders its result", async ({ page }) => {

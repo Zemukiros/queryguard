@@ -20,6 +20,7 @@ import { useTheme } from "./hooks/useTheme";
 import { BAND } from "./lib/bands";
 import type { Example } from "./lib/examples";
 import { formatCell, formatMs, formatUsd } from "./lib/format";
+import { modeCopy } from "./lib/mode";
 import { timelineRows } from "./lib/stages";
 
 const DEFAULT_RUN_QUESTION = "Run my SQL";
@@ -93,11 +94,15 @@ export default function App() {
                 {formatUsd(result.cost_usd)} · {result.n_calls} call{result.n_calls === 1 ? "" : "s"} · {formatMs(result.elapsed_ms)}
               </span>
               {result.cached && <Chip tone="accent">cached</Chip>}
+              {result.mode === "demo" && result.mode_reason && (
+                <span data-testid="simulated" title={modeCopy(result.mode_reason).detail}><Chip tone="info">simulated model</Chip></span>
+              )}
               <div className="basis-full"><FeedbackControls key={result.query_id} queryId={result.query_id} /></div>
             </div>
           )}
 
-          <PipelineTimeline rows={rows} replayed={state.replayed} running={running} startedAt={state.startedAt} result={result} />
+          <PipelineTimeline rows={rows} replayed={state.replayed} running={running} startedAt={state.startedAt} result={result}
+            awaitingFirstEvent={running && state.order.length === 0} />
 
           {result?.outcome === "clarification" && (
             <ClarificationView result={result} running={running} onPick={(sql) => { runSql(sql, result.question, "reading"); }} />

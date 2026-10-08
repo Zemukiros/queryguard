@@ -11,6 +11,7 @@ setting variables, never by editing code:
     QUERYGUARD_APP_DB                SQLite file for history, feedback and cache (data/app.db)
     QUERYGUARD_TRUST_PROXY           1 = client IP from the last X-Forwarded-For hop (0)
     QUERYGUARD_FAKE_LLM              1 = answer from llm/fake.py, never the API; $0 (0)
+    QUERYGUARD_LIVE                  0 = kill switch: every question runs in demo mode (1)
     QUERYGUARD_REDIS_URL             app state in Redis (queryguard.state.redis), shared by every
                                      instance; unset = in-process state (queryguard.state.local)
     QUERYGUARD_STATE_PREFIX          prefix for every Redis key, so deployments can share one
@@ -19,21 +20,24 @@ setting variables, never by editing code:
     QUERYGUARD_RESERVATION_TTL_S     a spend reservation expires after this, so one held by a
                                      crashed instance frees itself (300, the platform time limit)
 
-Fake mode also points the LLM call log at logs/fake_llm_calls.jsonl (unless
-QUERYGUARD_LLM_LOG is set), so the real ledger -- and the spend ceiling read
-from it -- never sees fake calls, and lifts the process request cap, which
-exists to protect money that fake mode does not spend.
+    QUERYGUARD_FAKE_LLM_LOG          where simulated calls are logged with local state
+                                     (logs/fake_llm_calls.jsonl); with Redis state they are not logged
+
+Modes. A question runs live (the real model) unless one of these sends it to
+demo mode (llm/fake.py: $0, answers the eval set's questions), in this order:
+QUERYGUARD_FAKE_LLM=1 (a demo-only deployment), QUERYGUARD_LIVE=0 (the kill
+switch), today's spend ceiling, today's call cap. The answer and /healthz say
+which mode and why. Simulated calls never touch the real ledger or the caps.
 
 The reserve is about twice the most expensive question in the live eval run
 ($0.0255), so questions already running cannot carry spend past the ceiling.
 
-Spend is read from the LLM call log (QUERYGUARD_LLM_LOG, default
-logs/llm_calls.jsonl), which every API call appends to -- including CLI runs on
-the same host, so the ceiling errs towards stopping early.
-
-QUERYGUARD_MAX_REQUESTS (llm/client.py) still applies: it is a process-lifetime
-runaway guard, 50 by default, i.e. about 12 questions per server start. A
-long-running server should raise it; the daily ceiling is the real control.
+With local state, spend is read from the LLM call log (QUERYGUARD_LLM_LOG,
+default logs/llm_calls.jsonl) -- including CLI runs on the same host, so the
+ceiling errs towards stopping early -- and the daily call cap is counted in
+memory. With Redis state both are shared by every instance. The API's own
+calls are capped by QUERYGUARD_DAILY_CALL_CAP; QUERYGUARD_MAX_REQUESTS
+(llm/client.py) now guards only the CLI and the evals.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ class Settings:
     db_path: Path = field(default_factory=lambda: REPO_ROOT / "data" / "app.db")
     trust_proxy: bool = False
     fake_llm: bool = False
+    live: bool = True
     redis_url: str | None = None
     state_prefix: str = "qg:"
     daily_call_cap: int = 200
@@ -81,6 +86,7 @@ class Settings:
             db_path=REPO_ROOT / _env("QUERYGUARD_APP_DB", "data/app.db"),
             trust_proxy=_env("QUERYGUARD_TRUST_PROXY", "0") == "1",
             fake_llm=_env("QUERYGUARD_FAKE_LLM", "0") == "1",
+            live=_env("QUERYGUARD_LIVE", "1") != "0",
             redis_url=_env("QUERYGUARD_REDIS_URL", "") or None,
             state_prefix=_env("QUERYGUARD_STATE_PREFIX", "qg:"),
             daily_call_cap=int(_env("QUERYGUARD_DAILY_CALL_CAP", "200")),

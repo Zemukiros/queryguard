@@ -38,7 +38,7 @@ from typing import Any
 import redis
 
 from queryguard.api.settings import Settings
-from queryguard.llm.client import CallGuard, RequestCapExceeded
+from queryguard.llm.client import CallGuard, DemoCallGuard, RequestCapExceeded
 from queryguard.state import AppState, Reservation
 
 DAY_S = 86_400
@@ -157,6 +157,12 @@ class RedisState(AppState):
     def call_guard(self) -> CallGuard:
         return self._guard
 
+    def demo_call_guard(self) -> CallGuard:
+        return DemoCallGuard(None)   # simulated calls cost nothing and are not logged here
+
+    def calls_today(self) -> int:
+        return int(self.r.get(self._k(f"calls:{_today()}")) or 0)
+
     # ---------------------------------------------------------------- cache
 
     def cache_get(self, key: str) -> dict[str, Any] | None:
@@ -171,10 +177,11 @@ class RedisState(AppState):
     def record(
         self, *, query_id: str, client: str, question: str, outcome: str, confidence: float | None,
         cached: bool, cost_usd: float, elapsed_ms: int, result: dict[str, Any], sql_source: str = "model",
+        mode: str = "live",
     ) -> None:
         row = {"query_id": query_id, "created_at": _now_iso(), "client": client, "question": question,
                "outcome": outcome, "confidence": confidence, "cached": cached, "cost_usd": cost_usd,
-               "elapsed_ms": elapsed_ms, "sql_source": sql_source,
+               "elapsed_ms": elapsed_ms, "sql_source": sql_source, "mode": mode,
                "result_json": json.dumps(result, default=str)}
         hist = self._k(f"hist:{client}")
         with self.r.pipeline(transaction=True) as pipe:
@@ -202,6 +209,7 @@ class RedisState(AppState):
             out.append({
                 **{k: row[k] for k in ("query_id", "created_at", "question", "outcome", "confidence",
                                        "cached", "cost_usd", "sql_source")},
+                "mode": row.get("mode", "live"),
                 "correct": fb["correct"] if fb else None,
                 "note": fb["note"] if fb else None,
                 "feedback_at": fb["created_at"] if fb else None,

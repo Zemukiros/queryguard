@@ -148,6 +148,13 @@ class ConfidencePayload(Out):
     scorer_version: str
 
 
+Mode = Literal["live", "demo"]
+# Why a question ran in demo mode: a demo-only deployment (QUERYGUARD_FAKE_LLM=1),
+# live answers switched off (QUERYGUARD_LIVE=0), today's spend ceiling, or
+# today's cap on LLM calls.
+ModeReason = Literal["demo_deployment", "switched_off", "budget", "call_cap"]
+
+
 class QueryResult(Out):
     """Everything a question produced. The `done` payload, and the body of POST /v1/query."""
 
@@ -159,6 +166,10 @@ class QueryResult(Out):
     sql_source: Literal["model", "user", "reading"] = Field(
         "model", description="user: SQL supplied to /v1/run; reading: a clarification's reading, run via /v1/run."
     )
+    mode: Mode = Field(
+        "live", description="demo: a simulated model answered (llm/fake.py) and nothing was spent."
+    )
+    mode_reason: ModeReason | None = Field(None, description="Why it ran in demo mode; None when live.")
 
     sql: str | None = Field(None, description="The SQL the model wrote.")
     executed_sql: str | None = Field(None, description="What ran: the guardrail may have added a LIMIT.")

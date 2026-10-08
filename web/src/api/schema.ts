@@ -11,7 +11,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Healthz */
+        /**
+         * Healthz
+         * @description Liveness plus what a question would run as now. The web app calls this on
+         *     load, which also starts a serverless instance while the visitor reads.
+         */
         get: operations["healthz_healthz_get"];
         put?: never;
         post?: never;
@@ -462,9 +466,25 @@ export interface components {
             budget: components["schemas"]["Budget"];
             /**
              * Fake Llm
-             * @description True: answers come from llm/fake.py, not a model; nothing is spent.
+             * @description True: a demo-only deployment; answers always come from llm/fake.py.
              */
             fake_llm: boolean;
+            /**
+             * Mode
+             * @description What a new question would run as right now.
+             * @enum {string}
+             */
+            mode: "live" | "demo";
+            /**
+             * Mode Reason
+             * @description Why demo mode; None when live.
+             */
+            mode_reason: ("demo_deployment" | "switched_off" | "budget" | "call_cap") | null;
+            /**
+             * Resets In S
+             * @description Seconds until the budget and call cap reset (00:00 UTC), when they are the reason for demo mode.
+             */
+            resets_in_s: number | null;
             /** Scorer Version */
             scorer_version: string;
             /** Status */
@@ -492,6 +512,12 @@ export interface components {
             /** Created At */
             created_at: string;
             feedback: components["schemas"]["HistoryFeedback"] | null;
+            /**
+             * Mode
+             * @default live
+             * @enum {string}
+             */
+            mode: "live" | "demo";
             /**
              * Outcome
              * @description A QueryResult outcome, or 'error'.
@@ -598,6 +624,18 @@ export interface components {
             guardrail_rule: string | null;
             /** Interpretations */
             interpretations: components["schemas"]["Interpretation"][];
+            /**
+             * Mode
+             * @description demo: a simulated model answered (llm/fake.py) and nothing was spent.
+             * @default live
+             * @enum {string}
+             */
+            mode: "live" | "demo";
+            /**
+             * Mode Reason
+             * @description Why it ran in demo mode; None when live.
+             */
+            mode_reason: ("demo_deployment" | "switched_off" | "budget" | "call_cap") | null;
             /**
              * N Calls
              * @default 0

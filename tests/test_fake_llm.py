@@ -7,6 +7,8 @@ reading the guardrail refuses or the database rejects would break the demo.
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -22,8 +24,6 @@ from queryguard.llm.client import reset_request_count
 def _isolate(monkeypatch):
     reset_request_count()
     monkeypatch.setenv("QUERYGUARD_FAKE_LLM_DELAY_MS", "0")
-    # Fake mode setdefault()s these; owning them here means the test undoes it.
-    monkeypatch.setenv("QUERYGUARD_MAX_REQUESTS", "50")
     yield
     reset_request_count()
 
@@ -97,14 +97,16 @@ def test_fake_mode_refuses_unknown_questions(client) -> None:
     assert done["outcome"] == "cannot_answer" and "eval set" in done["cannot_answer_reason"]
 
 
-def test_fake_mode_moves_the_log_and_lifts_the_cap(tmp_path, monkeypatch) -> None:
-    from queryguard.llm.client import log_path, max_requests
+def test_simulated_calls_stay_out_of_the_real_ledger_and_caps(client, live_database) -> None:
+    from queryguard.llm.client import log_path
 
-    monkeypatch.delenv("QUERYGUARD_LLM_LOG")
-    monkeypatch.delenv("QUERYGUARD_MAX_REQUESTS")
-    client = TestClient(create_app(Settings(db_path=tmp_path / "app.db", fake_llm=True)))
-    assert log_path().name == "fake_llm_calls.jsonl"
-    assert max_requests() > 10**6
+    for _ in range(3):
+        done = client.post("/v1/query", json={"question": "How many orders were cancelled?"}).json()
+        assert done["mode"] == "demo" and done["mode_reason"] == "demo_deployment"
+    assert not log_path().exists(), "nothing reached the real call log"
+    fake_log = Path(os.environ["QUERYGUARD_FAKE_LLM_LOG"])
+    assert len(fake_log.read_text().splitlines()) >= 3
+    assert client.app.state.qg.store.calls_today() == 0, "simulated calls do not count against the cap"
     assert client.get("/healthz").json()["budget"]["spent_today_usd"] == 0.0
 
 
@@ -131,5 +133,6 @@ def test_a_reading_run_is_labelled_as_a_reading(client, live_database) -> None:
     done = client.post("/v1/run", json=body).json()
     assert done["sql_source"] == "reading" and done["agreement"] == "agree"
     again = client.post("/v1/run", json={**body, "source": "user"}).json()
-    assert again["cached"] is True and again["sql_source"] == "user"
+    assert again["cached"] is False, "simulated answers are never cached"
+    assert again["sql_source"] == "user"
     assert [i["sql_source"] for i in client.get("/v1/history").json()] == ["user", "reading"]

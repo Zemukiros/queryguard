@@ -71,10 +71,15 @@ sequence and payloads); `run_question` / `run_answer` only drain it. Blocking SD
   weights are the fallback). `pipeline.MAX_CALLS_PER_QUESTION` (4) bounds API calls per question.
 
 - `api/` — FastAPI (`app.py`; `create_app()` is the factory, tests inject a schema and fake-backed clients).
-  Admission before any API call: cache hit (free, no rate-limit use) → per-client rate limit (429) → daily spend
-  ceiling read from the LLM call log, with a per-question reserve (503). History/feedback/cache live in SQLite
-  (`store.py`, `data/app.db`) — never give the API a writable Postgres identity. Limits are env vars (`settings.py`).
-  Stage exception text is logged, not returned.
+  Admission before any API call: cache hit (free, no rate-limit use) → per-client rate limit (429) → mode. A question
+  runs live unless the deployment is demo-only, `QUERYGUARD_LIVE=0`, the spend ceiling has no room, or the daily call
+  cap is near — then it runs on the simulated model and says why (`mode`, `mode_reason`; never cached).
+  Limits are env vars (`settings.py`). Stage exception text is logged, not returned.
+- `state/` — ALL of the API's own state behind `AppState`: rate limits, spend reservations, today's spend, the LLM
+  call guard (daily call cap + spend ledger), cache, history, feedback, client salt. `LocalState` (in-process +
+  SQLite + JSONL ledger; dev/tests) and `RedisState` (production; atomic Lua scripts in `state/lua/`, commented line
+  by line). `tests/test_state.py` holds both to one contract. Never give the API a writable Postgres identity.
+  `LLMClient` takes a `CallGuard`; the default (process cap + JSONL) is for the CLI/evals only.
 
 Packaging: `Dockerfile` (API, non-root, editable install so `REPO_ROOT` resolves) and `web/Dockerfile` (nginx,
 proxies `/v1` unbuffered). In compose the API holds only the read-only URL; the one-shot `introspect` service

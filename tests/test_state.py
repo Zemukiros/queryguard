@@ -166,13 +166,14 @@ def test_the_cache_round_trips_a_result(state) -> None:
 
 def test_history_is_newest_first_limited_and_scoped(state) -> None:
     for i in range(3):
-        _record(state, f"q{i}")
+        _record(state, f"q{i}", mode="demo" if i == 2 else "live")
     _record(state, "other", client="c2")
 
     rows = state.history("c1", 2)
     assert [r["query_id"] for r in rows] == ["q2", "q1"]
     row = rows[0]
     assert row["question"] == "q q2" and row["outcome"] == "answered" and row["sql_source"] == "model"
+    assert row["mode"] == "demo" and rows[1]["mode"] == "live"
     assert not row["cached"] and row["confidence"] == pytest.approx(0.9)
     assert row["correct"] is None and row["note"] is None and row["feedback_at"] is None
 
@@ -259,14 +260,26 @@ def test_a_reservation_from_a_crashed_instance_expires(make_redis) -> None:
     assert state.try_reserve()[0] is not None, "expired reservations stop counting"
 
 
-def test_the_daily_call_cap_holds_across_parallel_calls(make_redis) -> None:
+def test_the_daily_call_cap_holds_across_parallel_calls(make) -> None:
     from queryguard.llm.client import RequestCapExceeded
 
-    state = make_redis(daily_call_cap=10)
+    state = make(daily_call_cap=10)
     guard = state.call_guard()
     results = _in_parallel(50, guard.before_call)
     assert sum(r is None for r in results) == 10
     assert all(isinstance(r, RequestCapExceeded) for r in results if r is not None)
+    assert state.calls_today() == 10, "refused calls are not counted"
+
+
+def test_simulated_calls_are_never_capped_or_counted(make) -> None:
+    state = make(daily_call_cap=2)
+    demo = state.demo_call_guard()
+    for _ in range(5):
+        demo.before_call()
+        demo.after_call({"timestamp": datetime.now(timezone.utc).isoformat(), "estimated_cost_usd": 0.5})
+    assert state.calls_today() == 0 and state.spent_today() == 0.0
+    state.call_guard().before_call()  # the real cap is untouched
+    assert state.calls_today() == 1
 
 
 def test_prefixes_isolate_deployments(redis_client, tmp_path) -> None:

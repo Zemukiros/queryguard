@@ -2,12 +2,16 @@ import { useQuery } from "@tanstack/react-query";
 
 import { api } from "../api/client";
 import { formatUsd } from "../lib/format";
+import { modeCopy } from "../lib/mode";
 import { Database, Moon, Shield, Sun } from "./icons";
 import { Button, Chip } from "./ui";
 
 export function Header({ theme, onToggleTheme, onOpenSchema }: {
   theme: "light" | "dark"; onToggleTheme: () => void; onOpenSchema: () => void;
 }) {
+  // Fetched on page load: besides the mode, this starts a serverless instance
+  // while the visitor is still reading, so the first question is not the one
+  // that waits for it.
   const health = useQuery({ queryKey: ["health"], queryFn: api.health, refetchInterval: 30_000 });
   return (
     <header className="sticky top-0 z-20 border-b border-line bg-surface/95 backdrop-blur">
@@ -18,13 +22,16 @@ export function Header({ theme, onToggleTheme, onOpenSchema }: {
           <p className="hidden truncate text-[11.5px] text-ink-3 sm:block">Text-to-SQL behind a read-only database role, with every check shown</p>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          {health.data?.fake_llm && (
-            <span data-testid="fake-badge" title="Demo mode: a simulated model answers the eval set's questions. The guardrail, database and checks are real. Nothing is spent.">
-              <Chip tone="info"><span className="sm:hidden">Demo · $0</span><span className="hidden sm:inline">Demo mode · simulated model · $0</span></Chip>
+          {health.data?.mode_reason && (
+            <span data-testid="mode-badge" data-reason={health.data.mode_reason} title={modeCopy(health.data.mode_reason, health.data.resets_in_s).detail}>
+              <Chip tone="info">
+                <span className="sm:hidden">Demo · $0</span>
+                <span className="hidden sm:inline">{modeCopy(health.data.mode_reason, health.data.resets_in_s).label}</span>
+              </Chip>
             </span>
           )}
-          {health.data && !health.data.fake_llm && (
-            <span className="hidden font-mono text-[11px] text-ink-3 md:inline">
+          {health.data?.mode === "live" && (
+            <span className="hidden font-mono text-[11px] text-ink-3 md:inline" data-testid="live-budget">
               {formatUsd(health.data.budget.spent_today_usd)} of {formatUsd(health.data.budget.daily_ceiling_usd)} today
             </span>
           )}

@@ -20,6 +20,16 @@ const rowStates = () =>
   within(screen.getByTestId("timeline")).getAllByRole("listitem").map((li) => [li.dataset.stage, li.dataset.state]);
 
 describe("PipelineTimeline", () => {
+  it("says the server is starting when the first event is slow, and only then", () => {
+    const rows = timelineRows({ seen: {}, mode: "query", running: true, failedStage: null, result: null });
+    const { rerender } = render(<PipelineTimeline rows={rows} replayed={null} running startedAt={Date.now()} result={null} awaitingFirstEvent />);
+    expect(screen.queryByTestId("starting-server")).toBeNull();
+    rerender(<PipelineTimeline rows={rows} replayed={null} running startedAt={Date.now() - 2000} result={null} awaitingFirstEvent />);
+    expect(screen.getByTestId("starting-server")).toHaveTextContent("Starting the server");
+    rerender(<PipelineTimeline rows={rows} replayed={null} running startedAt={Date.now() - 2000} result={null} awaitingFirstEvent={false} />);
+    expect(screen.queryByTestId("starting-server")).toBeNull();
+  });
+
   it("renders every stage in pipeline order and lights them as events arrive", () => {
     const events = normalRun();
     const { rerender } = timelineAfter(events.slice(0, 3), true);

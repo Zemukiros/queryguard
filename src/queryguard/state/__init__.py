@@ -20,8 +20,9 @@ What the interface covers (the stateful items a multi-instance deploy must share
   4. the response cache                     cache_get / cache_put
   5. history, feedback, the client salt     record / history / get_result / exists /
                                             save_feedback / incorrect_feedback / client_key
-  6. the daily cap on LLM calls             call_guard().before_call
+  6. the daily cap on LLM calls             call_guard().before_call, calls_today
   7. the LLM call log                       call_guard().after_call
+Simulated (demo-mode) calls get demo_call_guard(): no cap, no spend.
 The schema cache (8) and where all of this lives (9) are deployment concerns,
 not methods: see docs/DEPLOYMENT.md.
 """
@@ -81,7 +82,15 @@ class AppState(ABC):
 
     @abstractmethod
     def call_guard(self) -> CallGuard:
-        """Admits each LLM call (the daily call cap) and records it (spend, log)."""
+        """For the real model: admits each call (the daily call cap) and records it (spend, log)."""
+
+    @abstractmethod
+    def demo_call_guard(self) -> CallGuard:
+        """For the simulated model: never capped, never counted as spend."""
+
+    @abstractmethod
+    def calls_today(self) -> int:
+        """Real-model LLM calls made today (UTC), against settings.daily_call_cap."""
 
     # ---------------------------------------------------------------- cache
 
@@ -97,12 +106,13 @@ class AppState(ABC):
     def record(
         self, *, query_id: str, client: str, question: str, outcome: str, confidence: float | None,
         cached: bool, cost_usd: float, elapsed_ms: int, result: dict[str, Any], sql_source: str = "model",
+        mode: str = "live",
     ) -> None: ...
 
     @abstractmethod
     def history(self, client: str, limit: int) -> list[dict[str, Any]]:
         """Newest first. Each row: query_id, created_at, question, outcome, confidence,
-        cached, cost_usd, sql_source, and correct / note / feedback_at (None without feedback)."""
+        cached, cost_usd, sql_source, mode, and correct / note / feedback_at (None without feedback)."""
 
     @abstractmethod
     def get_result(self, query_id: str, client: str) -> dict[str, Any] | None:

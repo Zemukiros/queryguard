@@ -153,17 +153,53 @@ def _spend_today(amount: float) -> None:
         handle.write('{"truncated')
 
 
-def test_the_spend_ceiling_answers_503_before_any_call(tmp_path) -> None:
+def test_a_spent_budget_falls_back_to_demo_mode_without_calling_the_model(tmp_path, live_database) -> None:
     _spend_today(0.98)
     assert spent_today_usd() == pytest.approx(0.98)  # other days and a torn line are ignored
     client, fake = _client(tmp_path, _answer(COUNT_SQL), daily_spend_usd=1.00)
 
-    for endpoint in ("/v1/query", "/v1/query/stream"):
-        response = client.post(endpoint, json={"question": "How many orders were cancelled?"})
-        assert response.status_code == 503
-        assert "daily budget" in response.json()["detail"]
-        assert int(response.headers["retry-after"]) > 0
-    assert fake.calls == []
+    health = client.get("/healthz").json()
+    assert health["mode"] == "demo" and health["mode_reason"] == "budget" and health["resets_in_s"] > 0
+
+    done = client.post("/v1/query", json={"question": "How many orders were cancelled?"}).json()
+    assert done["mode"] == "demo" and done["mode_reason"] == "budget"
+    assert done["outcome"] == "answered" and done["cost_usd"] == 0.0  # the simulated model answered
+    streamed = client.post("/v1/query/stream", json={"question": "How many orders were cancelled?"})
+    assert streamed.headers["x-queryguard-mode"] == "demo"
+    assert _events(streamed)[-1][1]["payload"]["mode"] == "demo"
+    assert fake.calls == [], "the real model was never called"
+    assert spent_today_usd() == pytest.approx(0.98), "simulated calls are not spend"
+
+    [latest, *_] = client.get("/v1/history").json()
+    assert latest["mode"] == "demo"
+
+
+def test_demo_answers_are_never_cached(tmp_path, live_database) -> None:
+    client, _ = _client(tmp_path, _answer(COUNT_SQL), live=False)
+    for _ in range(2):
+        done = client.post("/v1/query", json={"question": "How many orders were cancelled?"}).json()
+        assert done["mode"] == "demo" and done["mode_reason"] == "switched_off" and not done["cached"]
+
+
+def test_the_kill_switch_sends_everything_to_demo_mode(tmp_path, live_database) -> None:
+    client, fake = _client(tmp_path, _answer(COUNT_SQL), live=False)
+    assert client.get("/healthz").json()["mode_reason"] == "switched_off"
+    done = client.post("/v1/query", json={"question": "How many orders were cancelled?"}).json()
+    assert done["mode"] == "demo" and fake.calls == []
+
+
+def test_a_nearly_used_call_cap_falls_back_to_demo_mode(tmp_path, live_database) -> None:
+    client, fake = _client(tmp_path, _answer(COUNT_SQL), daily_call_cap=3)  # under one question's 4 calls
+    done = client.post("/v1/query", json={"question": "How many orders were cancelled?"}).json()
+    assert done["mode"] == "demo" and done["mode_reason"] == "call_cap" and fake.calls == []
+    assert client.app.state.qg.store._reserved == set(), "the reservation taken before the cap check is released"
+
+
+def test_live_answers_say_so(tmp_path) -> None:
+    client, _ = _client(tmp_path, _ambiguous_answer())
+    assert client.get("/healthz").json()["mode"] == "live"
+    done = client.post("/v1/query", json={"question": "What was revenue?"}).json()
+    assert done["mode"] == "live" and done["mode_reason"] is None
 
 
 # ---------------------------------------------------------------------- cache
@@ -317,15 +353,17 @@ def test_user_sql_runs_through_every_check(tmp_path, live_database) -> None:
     assert reopened["rows"] == done["rows"] and reopened["sql_source"] == "user"
 
 
-def test_run_requests_get_the_same_rate_limit_and_ceiling(tmp_path) -> None:
+def test_run_requests_get_the_same_rate_limit_and_ceiling(tmp_path, live_database) -> None:
     client, fake = _client(tmp_path, _ambiguous_answer(), rate_per_minute=1)
     assert client.post("/v1/run", json={"question": "q", "sql": "DROP TABLE a"}).status_code == 200
     assert client.post("/v1/run", json={"question": "q", "sql": "DROP TABLE b"}).status_code == 429
 
     _spend_today(5.0)
     client, fake = _client(tmp_path / "other", _answer(COUNT_SQL))
-    for endpoint in ("/v1/run", "/v1/run/stream"):
-        assert client.post(endpoint, json={"question": "q", "sql": COUNT_SQL}).status_code == 503
+    done = client.post("/v1/run", json={"question": "q", "sql": COUNT_SQL}).json()
+    assert done["mode"] == "demo" and done["mode_reason"] == "budget"
+    streamed = client.post("/v1/run/stream", json={"question": "q", "sql": COUNT_SQL})
+    assert streamed.headers["x-queryguard-mode"] == "demo"
     assert fake.calls == []
 
 

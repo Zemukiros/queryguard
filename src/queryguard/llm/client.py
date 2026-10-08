@@ -133,6 +133,24 @@ class CallGuard:
 PROCESS_GUARD = CallGuard()
 
 
+class DemoCallGuard(CallGuard):
+    """For the simulated model: never capped, never counted as spend.
+
+    Calls go to their own log (or none), so the real ledger -- and the spend
+    ceiling read from it -- never sees them.
+    """
+
+    def __init__(self, log: Path | None = None) -> None:
+        self._log = log
+
+    def before_call(self) -> None:
+        pass
+
+    def after_call(self, entry: dict[str, Any], log: Path | None = None) -> None:
+        if self._log is not None:
+            append_log(entry, self._log)
+
+
 # ------------------------------------------------------------------- costing
 
 

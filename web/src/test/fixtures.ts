@@ -49,7 +49,7 @@ export const confidence = (over: Partial<PayloadOf<"confidence">> = {}): Payload
 });
 
 export const result = (over: Partial<QueryResult> = {}): QueryResult => ({
-  stage: "done", query_id: "q1", question: "How many orders are there?", outcome: "answered", cached: false, sql_source: "model",
+  stage: "done", query_id: "q1", question: "How many orders are there?", outcome: "answered", cached: false, sql_source: "model", mode: "live", mode_reason: null,
   sql: "SELECT count(*) AS n FROM orders", executed_sql: "SELECT count(*) AS n FROM orders\nLIMIT 1001",
   explanation: "Counts orders.", assumptions: [], columns: ["n"], rows: [[5000]], row_count: 1, truncated: false, execution_ms: 3,
   guardrail_rule: null, guardrail_reason: null, execution_error: null, sanity: [],
