@@ -19,7 +19,7 @@ test("with today's live budget spent, questions run on the simulated model and s
   await expect(badge).toContainText("today's live budget is used up");
   await expect(page.getByTestId("live-budget")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "How many orders were cancelled?" }).click();
+  await page.getByTestId("examples").getByRole("button", { name: "How many orders were cancelled?" }).click();
   await expect(page.locator("[data-testid=timeline] [data-stage=done]")).toHaveAttribute("data-state", "done");
   await expect(page.getByTestId("simulated")).toBeVisible();
   await expect(page.getByTestId("cost-latency")).toContainText("$0");

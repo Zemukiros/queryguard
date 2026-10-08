@@ -7,7 +7,7 @@ test("a slow first byte shows 'Starting the server…' until the first event arr
     await route.continue();
   });
   await page.goto("/");
-  await page.getByRole("button", { name: "How many orders were cancelled?" }).click();
+  await page.getByTestId("examples").getByRole("button", { name: "How many orders were cancelled?" }).click();
 
   const note = page.getByTestId("starting-server");
   await expect(note).toBeVisible({ timeout: 2400 });

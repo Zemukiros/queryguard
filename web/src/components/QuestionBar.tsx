@@ -19,7 +19,7 @@ export function QuestionBar({ value, onChange, onAsk, onExample, running }: {
       </form>
       <div className="mt-2 flex items-center gap-1.5">
         <span className="shrink-0 text-[12px] text-ink-2">Try:</span>
-        <div className="-mr-4 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto pr-4 pb-1 sm:mr-0 sm:flex-wrap sm:overflow-visible sm:pr-0 sm:pb-0">
+        <div data-testid="examples" className="-mr-4 flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto pr-4 pb-1 sm:mr-0 sm:flex-wrap sm:overflow-visible sm:pr-0 sm:pb-0">
         {EXAMPLES.map((example) => (
           <button key={example.label} type="button" onClick={() => { onExample(example); }}
             className="shrink-0 whitespace-nowrap rounded-full border border-line bg-surface px-2.5 py-0.5 text-[12px] text-ink-2 hover:border-line-strong hover:text-ink">

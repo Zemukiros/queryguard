@@ -8,7 +8,7 @@ test.beforeEach(async ({ page }) => {
 });
 
 test("a question streams through every stage and renders its result", async ({ page }) => {
-  await page.getByRole("button", { name: "How many orders were cancelled?" }).click();
+  await page.getByTestId("examples").getByRole("button", { name: "How many orders were cancelled?" }).click();
 
   await expect(timelineRow(page, "done")).toHaveAttribute("data-state", "done");
   for (const stage of ["generating", "guardrails", "executing", "sanity", "backtranslate", "agreement", "confidence"]) {
