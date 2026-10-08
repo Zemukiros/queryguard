@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from queryguard.config import REPO_ROOT, load_env
+from queryguard.config import load_env, log_target
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +102,8 @@ def max_requests() -> int:
 
 
 def log_path() -> Path:
-    override = os.getenv("QUERYGUARD_LLM_LOG")
-    return Path(override) if override else REPO_ROOT / "logs" / "llm_calls.jsonl"
+    # On Vercel the API's real ledger is Redis (state/redis.py), so the file is off.
+    return log_target("QUERYGUARD_LLM_LOG", "llm_calls.jsonl", on_platform="off")
 
 
 class CallGuard:
@@ -263,10 +263,17 @@ def prompt_hash(system_blocks: Any, user_message: str) -> str:
 
 
 def append_log(entry: dict[str, Any], path: Path | None = None) -> Path:
+    """Append one JSON line. A path of "-" prints it to stdout; "off" drops it."""
     target = path or log_path()
+    line = json.dumps(entry, sort_keys=True)
+    if str(target) == "off":
+        return target
+    if str(target) == "-":
+        print(line, flush=True)
+        return target
     target.parent.mkdir(parents=True, exist_ok=True)
     with target.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, sort_keys=True) + "\n")
+        handle.write(line + "\n")
     return target
 
 

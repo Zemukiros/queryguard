@@ -43,6 +43,25 @@ def load_env() -> None:
         _ENV_LOADED = True
 
 
+def on_vercel() -> bool:
+    """True inside a Vercel build or function: Vercel sets VERCEL=1 itself.
+
+    There the filesystem is read-only apart from /tmp and instances are
+    short-lived, so log files default to stdout or off (see log_target) and
+    the API takes the client IP from Vercel's own header.
+    """
+    return os.getenv("VERCEL") == "1"
+
+
+def log_target(env_var: str, filename: str, *, on_platform: str) -> Path:
+    """Where a JSONL log goes: the env var if set, else logs/<filename> locally,
+    else `on_platform` on Vercel ("-" = stdout, "off" = not written)."""
+    override = os.getenv(env_var)
+    if override:
+        return Path(override)
+    return Path(on_platform) if on_vercel() else REPO_ROOT / "logs" / filename
+
+
 def schema_cache_path() -> Path:
     """Where the introspected schema is cached. Overridable for tests."""
     override = os.getenv("QUERYGUARD_SCHEMA_CACHE")

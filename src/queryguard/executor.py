@@ -56,7 +56,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 
-from queryguard.config import REPO_ROOT, database_url
+from queryguard.config import database_url, log_target
 from queryguard.llm.client import append_log
 
 # Five seconds is far longer than any question a person waits on and short
@@ -80,10 +80,7 @@ OUTCOME_FAILED = "failed"
 
 def log_path() -> Path:
     """Where executions are logged. Overridable so tests never touch the real log."""
-    import os
-
-    override = os.getenv("QUERYGUARD_EXECUTOR_LOG")
-    return Path(override) if override else REPO_ROOT / "logs" / "executions.jsonl"
+    return log_target("QUERYGUARD_EXECUTOR_LOG", "executions.jsonl", on_platform="-")
 
 
 def sql_hash(sql: str) -> str:

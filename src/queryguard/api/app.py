@@ -363,6 +363,12 @@ def create_app(
     )
 
     def client_ip(request: Request) -> str:
+        if settings.vercel:
+            # Vercel's edge sets x-real-ip to the connecting client; a visitor
+            # cannot supply it (unlike the first entries of x-forwarded-for).
+            real_ip = request.headers.get("x-real-ip")
+            if real_ip:
+                return real_ip.strip()
         if settings.trust_proxy:
             forwarded = request.headers.get("x-forwarded-for")
             if forwarded:

@@ -15,6 +15,8 @@ Usage:  uv run python -m queryguard.schema.introspect --refresh
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +28,8 @@ from sqlalchemy import types as sqltypes
 from sqlalchemy.exc import SQLAlchemyError
 
 from queryguard.config import database_url, schema_cache_path
+
+logger = logging.getLogger(__name__)
 
 # Per-query ceiling for the profile pass. A wide or unindexed table must never
 # be able to hang a schema rebuild; a column that overruns is simply reported
@@ -428,6 +432,17 @@ def introspect_database(
 # -------------------------------------------------------------------- cache
 
 
+def _introspection_url():
+    """The owner when DATABASE_URL is set, else the read-only role.
+
+    Introspection only reads the catalog and SELECTs, and the read-only role
+    produces an identical schema (column comments and profile included). A
+    deployment that never holds the owner's credentials -- Vercel -- builds
+    its cache, or rebuilds it at first use, with the URL it already has.
+    """
+    return database_url(readonly=not os.getenv("DATABASE_URL"))
+
+
 def save_schema(schema: DatabaseSchema, path: Path | None = None) -> Path:
     target = Path(path) if path else schema_cache_path()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -451,8 +466,13 @@ def load_schema(
             # A truncated or stale-format cache is a reason to rebuild, not to fail.
             pass
 
-    schema = introspect_database(timeout_ms=timeout_ms)
-    save_schema(schema, target)
+    schema = introspect_database(_introspection_url(), timeout_ms=timeout_ms)
+    try:
+        save_schema(schema, target)
+    except OSError as exc:
+        # A read-only filesystem (a serverless function whose build did not
+        # produce the cache) still answers; it just introspects per instance.
+        logger.warning("schema cache not written to %s (%s); using it in memory", target, exc)
     return schema
 
 

@@ -15,7 +15,8 @@ setting variables, never by editing code:
     QUERYGUARD_REDIS_URL             app state in Redis (queryguard.state.redis), shared by every
                                      instance; unset = in-process state (queryguard.state.local)
     QUERYGUARD_STATE_PREFIX          prefix for every Redis key, so deployments can share one
-                                     database without seeing each other's state (qg:)
+                                     database without seeing each other's state (qg:; on Vercel,
+                                     "<VERCEL_ENV>:", i.e. production: or preview:)
     QUERYGUARD_DAILY_CALL_CAP        LLM calls per UTC day across all instances (Redis state) (200)
     QUERYGUARD_RESERVATION_TTL_S     a spend reservation expires after this, so one held by a
                                      crashed instance frees itself (300, the platform time limit)
@@ -46,7 +47,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from queryguard.config import REPO_ROOT, load_env
+from queryguard.config import REPO_ROOT, load_env, on_vercel
 
 
 def _env(name: str, default: str) -> str:
@@ -63,6 +64,8 @@ class Settings:
     frontend_origins: tuple[str, ...] = ("http://localhost:3000",)
     db_path: Path = field(default_factory=lambda: REPO_ROOT / "data" / "app.db")
     trust_proxy: bool = False
+    # On Vercel the client IP is read from x-real-ip, which Vercel's edge sets.
+    vercel: bool = False
     fake_llm: bool = False
     live: bool = True
     redis_url: str | None = None
@@ -88,7 +91,9 @@ class Settings:
             fake_llm=_env("QUERYGUARD_FAKE_LLM", "0") == "1",
             live=_env("QUERYGUARD_LIVE", "1") != "0",
             redis_url=_env("QUERYGUARD_REDIS_URL", "") or None,
-            state_prefix=_env("QUERYGUARD_STATE_PREFIX", "qg:"),
+            state_prefix=_env("QUERYGUARD_STATE_PREFIX",
+                              f"{os.getenv('VERCEL_ENV')}:" if on_vercel() and os.getenv("VERCEL_ENV") else "qg:"),
+            vercel=on_vercel(),
             daily_call_cap=int(_env("QUERYGUARD_DAILY_CALL_CAP", "200")),
             reservation_ttl_s=float(_env("QUERYGUARD_RESERVATION_TTL_S", "300")),
         )
