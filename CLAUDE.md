@@ -5,10 +5,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 QueryGuard is Text-to-SQL with a hard read-only database boundary: an LLM (Anthropic SDK) turns a question
 into SQL, a static guardrail gates it, a sandboxed executor runs it as a read-only role, and validation
 layers (result sanity checks, back-translation, agreement, confidence) flag answers that are probably wrong.
-Python 3.12 · uv · SQLAlchemy + psycopg 3 · sqlparse · pandas · PostgreSQL 16 in Docker.
+Python 3.12 · uv · FastAPI · SQLAlchemy + psycopg 3 · sqlparse · pandas · PostgreSQL 16 in Docker.
 
-There is no README yet; module docstrings are the design documentation — read the top of a module before
-changing it.
+README.md is the public overview; module docstrings are the design documentation — read the top of a module
+before changing it.
 
 ## Setup and commands
 
@@ -24,6 +24,8 @@ uv run pytest tests/test_guardrails.py -k cte    # single file / test
 uv run python -m queryguard.schema.introspect --refresh    # rebuild schema_cache.json
 uv run python -m queryguard.generate "How many orders were cancelled?"   # SQL only  (API call)
 uv run python -m queryguard.pipeline "how many orders last quarter?"     # end to end (API calls)
+uv run python -m queryguard.api                       # HTTP API on :8000 (/docs); questions cost API calls
+uv run python -m queryguard.api export-feedback       # incorrect feedback -> evals/feedback_candidates.yaml
 
 uv run python -m evals.run_golden                     # execute golden SQL, record row counts/hashes
 uv run python -m evals.mutations                      # build known-wrong negatives
@@ -42,6 +44,9 @@ touches no database or network and must never skip.
 
 `pipeline.py` orchestrates: **generate → guard → execute → validate → score**, and keeps each outcome a
 distinct type (`ClarificationNeeded`, `CannotAnswer`, guardrail rejection, execution result) — don't collapse them.
+There is ONE code path: `stream_question` is an async generator of typed stage events (`events.py` documents the
+sequence and payloads); `run_question` / `run_answer` only drain it. Blocking SDK/DB calls go through
+`asyncio.to_thread`. Add a stage there, never in a wrapper.
 
 - `config.py` — two database identities that must never be confused: `DATABASE_URL` (owner, used only for
   introspection) and `DATABASE_URL_READONLY` (`queryguard_ro`, used to execute generated SQL). Always go
@@ -59,6 +64,12 @@ distinct type (`ClarificationNeeded`, `CannotAnswer`, guardrail rejection, execu
 - `validation/` — `sanity.py` (result-shape flags; advice, not a gate), `backtranslate.py`, `agreement.py`,
   `confidence.py` (weights load from `calibration.json`, written by `evals/calibrate.py`; v0 hand-set
   weights are the fallback). `pipeline.MAX_CALLS_PER_QUESTION` (4) bounds API calls per question.
+
+- `api/` — FastAPI (`app.py`; `create_app()` is the factory, tests inject a schema and fake-backed clients).
+  Admission before any API call: cache hit (free, no rate-limit use) → per-client rate limit (429) → daily spend
+  ceiling read from the LLM call log, with a per-question reserve (503). History/feedback/cache live in SQLite
+  (`store.py`, `data/app.db`) — never give the API a writable Postgres identity. Limits are env vars (`settings.py`).
+  Stage exception text is logged, not returned.
 
 `db/init/` holds the schema, seed data, the `queryguard_ro` role and column comments. `evals/` holds the golden
 set (`golden.yaml`), mutation negatives and the calibration harness; live run outputs are committed under

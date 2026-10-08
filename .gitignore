@@ -33,3 +33,8 @@ evals/results/dryrun*
 
 # Private Claude Code notes
 CLAUDE.local.md
+
+# API state: history, feedback, cache (SQLite). Holds demo users' questions.
+data/
+# Exported from that feedback; review, then move entries into golden.yaml.
+evals/feedback_candidates.yaml
