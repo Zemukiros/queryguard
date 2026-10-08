@@ -1,0 +1,7 @@
+# Build context for the API image: only what the Dockerfile copies.
+*
+!pyproject.toml
+!uv.lock
+!src/
+!evals/golden.yaml
+**/__pycache__

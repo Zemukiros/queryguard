@@ -1,3 +1,11 @@
+# `docker compose up` runs the whole demo: Postgres, the API in demo mode
+# (simulated model, $0, no API key) and the web UI on http://localhost:8080.
+#
+# Real model: put ANTHROPIC_API_KEY in .env, then `FAKE=0 docker compose up`.
+# Every question then costs API calls, capped by QUERYGUARD_DAILY_SPEND_USD.
+#
+# Development uses only the db service (`docker compose up -d db`, then `make dev`).
+
 services:
   db:
     image: postgres:16
@@ -23,5 +31,50 @@ services:
       retries: 10
       start_period: 10s
 
+  # One-shot: introspect the schema as the owner and cache it for the API, so
+  # the API container only ever holds the read-only role's credentials.
+  introspect:
+    build: .
+    command: ["python", "-m", "queryguard.schema.introspect", "--refresh"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-queryguard}:${POSTGRES_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-queryguard}
+    volumes:
+      - state:/app/state
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL_READONLY: postgresql://queryguard_ro:${POSTGRES_RO_PASSWORD:-changeme}@db:5432/${POSTGRES_DB:-queryguard}
+      # Demo mode unless FAKE=0: answers come from the golden set, nothing is spent.
+      QUERYGUARD_FAKE_LLM: ${FAKE:-1}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      QUERYGUARD_DAILY_SPEND_USD: ${QUERYGUARD_DAILY_SPEND_USD:-1.00}
+      QUERYGUARD_RATE_PER_MINUTE: ${QUERYGUARD_RATE_PER_MINUTE:-10}
+      QUERYGUARD_RATE_PER_DAY: ${QUERYGUARD_RATE_PER_DAY:-50}
+      # nginx in the web container is the only client; trust its X-Forwarded-For.
+      QUERYGUARD_TRUST_PROXY: "1"
+    volumes:
+      - state:/app/state
+      - appdata:/app/data
+    depends_on:
+      introspect:
+        condition: service_completed_successfully
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+
 volumes:
   pgdata:
+  state:
+  appdata:
