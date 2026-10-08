@@ -204,6 +204,39 @@ def test_the_judge_is_told_what_is_not_a_discrepancy() -> None:
     assert "row cap" in flat
 
 
+def test_the_judge_accepts_the_glossary_status_filter_on_revenue() -> None:
+    """refund-fix-2026-10-08: the correct refund_04 scored 0.6 for its status filter.
+
+    The judge had never seen the glossary the generator was told to apply. It now
+    gets the same text, and the rule that a glossary-implied filter is not a
+    discrepancy while leaving it out is.
+    """
+    from queryguard.llm.glossary import GLOSSARY
+    from queryguard.llm.prompt import SYSTEM_INSTRUCTIONS
+
+    fake = _Fake(AlignmentJudgement(alignment=1.0, discrepancies=[]))
+    translated = BackTranslation(
+        question="What is the gross revenue from orders placed in 2025 that have a status of paid, "
+                 "shipped, delivered, or refunded?",
+        details=["sum of orders.total_amount", "status IN ('paid','shipped','delivered','refunded')",
+                 "order_date in 2025"],
+    )
+    judgement, _ = judge_alignment(
+        "What was gross revenue from orders placed in 2025, before refunds?", translated,
+        client=LLMClient(sdk_client=fake, model=VALIDATION_MODEL),
+    )
+
+    [request] = fake.messages.calls
+    system = " ".join(block["text"] for block in request["system"])
+    assert GLOSSARY in system and GLOSSARY in SYSTEM_INSTRUCTIONS, "judge and generator share one definition"
+    flat = " ".join(system.split())
+    assert "a status filter that keeps paid, shipped, delivered and refunded orders IS what the original asked for" in flat
+    assert "Leaving that filter out, when the original asks about revenue, IS a discrepancy" in flat
+    assert "Database schema" not in system, "the glossary is business definitions, still no schema"
+    assert "status IN ('paid','shipped','delivered','refunded')" in request["messages"][0]["content"]
+    assert judgement.alignment == 1.0 and judgement.discrepancies == []
+
+
 def test_alignment_is_bounded_zero_to_one() -> None:
     with pytest.raises(ValueError):
         AlignmentJudgement(alignment=1.5, discrepancies=[])

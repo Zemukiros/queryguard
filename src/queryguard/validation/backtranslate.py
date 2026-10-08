@@ -14,7 +14,10 @@ Two calls, both on Haiku:
    avoid. Shown only the SQL, it has to say what the SQL does.
 2. The judge sees the two questions and no schema. Its job is semantic
    comparison of two English sentences; the schema would only invite it to
-   re-derive the SQL, which is the back-translator's job.
+   re-derive the SQL, which is the back-translator's job. It does see the
+   metric glossary (llm/glossary.py): business definitions are not schema, and
+   without them it scored the correct refund_04 at 0.6 for applying the
+   revenue status rule the generator had been told to apply.
 
 The back-translation prefix is the schema plus fixed instructions, with the
 breakpoint on the last block, and nothing else: no few-shot examples, because
@@ -32,6 +35,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from queryguard.llm.client import CallResult, LLMClient
+from queryguard.llm.glossary import GLOSSARY
 from queryguard.schema.introspect import DatabaseSchema
 
 VALIDATION_MODEL = "claude-haiku-4-5"
@@ -79,7 +83,16 @@ These are NOT discrepancies -- do not list them and do not lower the score:
   name beside an id);
 - column names or aliases;
 - a sort order the original did not ask about;
-- a row cap such as LIMIT 1000 or 1001 added for safety."""
+- a row cap such as LIMIT 1000 or 1001 added for safety;
+- a filter or definition that the glossary below makes part of the term the
+  original uses. "Revenue" means the glossary's revenue, so a status filter
+  that keeps paid, shipped, delivered and refunded orders IS what the original
+  asked for, even though the original never mentions statuses. Leaving that
+  filter out, when the original asks about revenue, IS a discrepancy.
+
+""" + GLOSSARY + """
+- An unqualified "revenue" may be read as gross or net; either reading
+  matches it, but both exclude pending and cancelled orders."""
 
 
 class BackTranslation(BaseModel):

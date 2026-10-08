@@ -26,6 +26,7 @@ from evals.run_eval import (
     TransientFailure,
     _transient_errors,
     build_items,
+    run_item,
     select_items,
     finished_ids,
     golden_frames,
@@ -377,3 +378,40 @@ def test_merge_replaces_rerun_rows_and_rejects_unknown_ids() -> None:
     ]
     with pytest.raises(SystemExit):
         merge(base, [{"id": "gen:zzz"}], "old", "new")
+
+
+def test_reusing_second_queries_rejudges_only_and_keeps_the_base_agreement(tmp_path, live_database) -> None:
+    from dataclasses import replace
+
+    item = next(i for i in build_items() if i.id == "mut:refund_04__drop_where")
+    base = {
+        "id": item.id, "run_id": "base-run", "population": MUTATION, "category": item.category,
+        "golden_id": item.golden_id, "mutation": item.mutation, "question": item.question, "sql": item.sql,
+        "outcome": "executed", "label": "wrong", "label_reason": "known mutation",
+        "features": dict(executed=True, self_confidence=0.9, alignment=0.2, discrepancy_count=3, sanity_fail=0,
+                         sanity_warn=1, sanity_info=0, agreement="disagree", guardrail_rewrote=True,
+                         row_count_bucket="1"),
+        "detectors": {"agreement": {"outcome": "disagree", "explanation": "x", "flagged": True,
+                                    "second_sql": "SELECT 1"},
+                      "sanity": {"fail": 0, "warn": 1, "info": 0, "checks": ["warn:revenue_status"], "flagged": True},
+                      "alignment": {"score": 0.2, "discrepancies": ["a", "b", "c"], "back_translation": "old",
+                                    "flagged": True}},
+        "corrections": {"sanity": {}}, "source_run": "base-run",
+    }
+    ctx = _context(tmp_path)
+    ctx.budget.reuse_second_sql = True
+    ctx = replace(ctx, reuse={item.id: base}, prompt_version="p-test")
+    assert ctx.budget.worst_case(MUTATION)[0] == 2
+
+    row = run_item(item, ctx)
+
+    assert [c["step"] for c in row["calls"]] == ["back_translate", "judge"]
+    assert row["calls"][0]["output"] == {"question": "(dry run)", "details": []}, "the judge's input is kept"
+    assert row["detectors"]["agreement"] == base["detectors"]["agreement"]
+    assert row["features"]["agreement"] == "disagree"
+    assert row["features"]["alignment"] == 1.0 and row["features"]["discrepancy_count"] == 0
+    assert row["detectors"]["alignment"]["back_translation"] == "(dry run)"
+    assert row["second_sql_from"] == "base-run" and row["prompt_version"] == "p-test"
+    assert "corrections" not in row and row["run_id"] == "dryrun-test"
+    assert base["features"]["alignment"] == 0.2, "the base row is not mutated"
+

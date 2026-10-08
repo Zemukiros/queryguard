@@ -192,6 +192,16 @@ def test_system_prompt_states_the_revenue_glossary() -> None:
     assert "Net revenue: gross revenue minus refunds.amount" in instructions
 
 
+def test_prompt_version_names_every_instruction_and_the_schema(monkeypatch) -> None:
+    import queryguard.prompt_version as pv
+
+    schema = _synthetic_schema()
+    version = pv.prompt_version(schema)
+    assert version == pv.prompt_version(schema) and version.startswith("p-")
+    monkeypatch.setattr(pv, "JUDGE_INSTRUCTIONS", pv.JUDGE_INSTRUCTIONS + " ")
+    assert pv.prompt_version(schema) != version
+
+
 def test_system_prompt_is_stable_across_questions() -> None:
     """The cached prefix must not vary, or every call is a cache miss."""
     schema = _synthetic_schema()

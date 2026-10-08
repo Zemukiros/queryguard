@@ -1,30 +1,43 @@
-# Eval results: `live-2026-10-01`
+# Eval results: `full-2026-10-08`, prompt `p-73b20568bab6`
 
-Every number here comes from the recorded run in `evals/results/live-2026-10-01.*`.
-The calibration was fitted and scored offline from that run. Calibrating made no API calls.
+Every number here comes from the recorded run in `evals/results/full-2026-10-08.*`. The calibration was fitted
+and scored offline from that run and made no API calls.
+
+**Prompt version `p-73b20568bab6`** (`queryguard.prompt_version`) hashes the model ids, every instruction text
+(generation, second opinion, back-translation, judge), the few-shot examples and the rendered schema, column
+comments included. Every row of the run records it. Any edit to any of these produces a new id. This version is
+the first with the metric glossary in the generator, the schema comments and the alignment judge (see
+[Fixed after first eval](#fixed-after-first-eval)).
 
 ```bash
-uv run python -m evals.calibrate --run-id live-2026-10-01   # refit, rescore, redraw: free, no DB, no API
+uv run python -m evals.run_eval --live --run-id full-2026-10-08 --reuse-second-sql merged-2026-10-08 \
+    --max-calls 480 --max-cost 1.60                      # the run: 450 calls, $1.336
+uv run python -m evals.recompute --run-id full-2026-10-08   # labels, agreement, sanity: offline, free
+uv run python -m evals.calibrate --run-id full-2026-10-08   # refit, rescore, redraw: free, no DB, no API
 ```
 
-Outputs: `evals/results/live-2026-10-01.calibration.json` (every metric in sections 2–4, plus each row's
-out-of-fold score).
-
-**The refund_04 blind spot has since been fixed and re-measured.** See [Fixed after first eval](#fixed-after-first-eval).
-The runtime weights (`src/queryguard/validation/calibration.json`) and `docs/calibration.png` now come from the
-merged run `merged-2026-10-08`. Sections 1–5 still describe `live-2026-10-01` as recorded.
+Outputs: `src/queryguard/validation/calibration.json` (runtime weights),
+`evals/results/full-2026-10-08.calibration.json` (every metric below, plus each row's out-of-fold score) and
+`docs/calibration.png`.
 
 ## The run
 
 194 items, all from `evals/golden.yaml`:
 
-| population | items | what it is | label |
+| population | items | what ran under `p-73b20568bab6` | label |
 |---|---|---|---|
-| generated | 50 | every golden question through the full pipeline (`run_question`) | result compared with the golden result |
-| mutation | 104 | known-wrong SQL from `evals/mutations.py`, through `run_answer` | wrong |
-| golden | 40 | the golden SQL itself, through `run_answer` | correct |
+| generated | 50 | the full pipeline (`run_question`): generation, back-translation, judge, second query | result compared with the golden result |
+| mutation | 104 | back-translation and judge on known-wrong SQL from `evals/mutations.py` | wrong |
+| golden | 40 | back-translation and judge on the golden SQL itself | correct |
 
-Models, from the call ledger: `claude-sonnet-5` (216 calls) writes the SQL, both the first and second query. `claude-haiku-4-5` (370 calls) handles back-translation and the alignment judge.
+**One exception to "one prompt version":** the second query. For the 144 mutation and golden rows it was reused,
+not regenerated. 129 rows come from `live-2026-10-01`, with a generator prompt that had no glossary. 15 rows (the
+refund mutations) come from `refund-fix-2026-10-08`, with the current generator prompt. The reused second queries
+were re-executed, and agreement was re-derived offline under the current rules. Everything that reads the
+glossary was re-run: generation, back-translation (through the schema comments) and the judge.
+
+Models, from the call ledger: `claude-sonnet-5` (84 calls) writes the SQL, both the first and second query.
+`claude-haiku-4-5` (366 calls) handles back-translation and the judge.
 
 ## 1. Generation accuracy
 
@@ -33,259 +46,205 @@ Models, from the call ledger: `claude-sonnet-5` (216 calls) writes the SQL, both
 | simple_lookup | 7 | 7 | |
 | join | 7 | 7 | join_06 counted correct under a relaxed comparison (see limitations) |
 | aggregation | 7 | 7 | agg_05 counted correct under a relaxed comparison (see limitations) |
-| date_range | 7 | 7 | |
+| date_range | 7 | 6 | **date_05 asked for clarification** instead of answering |
 | top_n | 6 | 6 | |
-| refund_trap | 6 | 5 | **refund_04 wrong** (see limitations) |
+| refund_trap | 6 | 6 | refund_04 fixed (see [Fixed after first eval](#fixed-after-first-eval)) |
 | ambiguous | 5 | 5 | 5/5 asked for clarification |
-| unanswerable | 5 | 5 | 4/5 refused (`CannotAnswer`), 1/5 answered with self-confidence 0.25 |
+| unanswerable | 5 | 5 | 5/5 refused (`CannotAnswer`) |
 | **total** | **50** | **49** | answerable: 39/40 · declines: 10/10 |
 
-**Clarification and refusal correctness.** All 5 ambiguous questions came back as `ClarificationNeeded`. None
-produced SQL. Of the 5 unanswerable questions, 4 were refused with a correct reason, for example "no warehouse
-table or column anywhere". The fifth, unans_01 ("average time between shipping and delivery"; there is no
-`delivered_at`), ran a stand-in query (`shipped_at - order_date`) with self-confidence 0.25. The harness counts
-self-confidence below 0.5 as a decline. The pipeline itself still returned an answer, but the calibrated score
-gives that answer **0.016**, so a caller would see it flagged.
+- **date_05** ("How many orders were shipped in August 2026?") came back as `ClarificationNeeded`. It was
+  answered correctly in `live-2026-10-01`. The eval row doesn't store the readings the model offered, so this run
+  can't say why it hesitated. The question doesn't mention revenue, so the glossary isn't an obvious cause.
+- **All 5 unanswerable questions were refused.** In `live-2026-10-01`, unans_01 ("average time between shipping
+  and delivery") ran a stand-in query. It is now refused: "there is no delivered-at timestamp anywhere".
+- **ambig_01** ("revenue last quarter") and **ambig_03** ("which customers spent the most last year") still ask
+  for clarification under the glossary. The glossary leaves gross-vs-net and "spent" open on purpose.
 
 ## 2. Calibration method
 
-- **Fitting set: 184 rows** (79 correct, 105 wrong): every row with a feature vector except unans_01.
-  Unanswerable and ambiguous items are labelled on whether the pipeline declined, not on whether their SQL was
-  right, so their label doesn't mean "this answer is correct". The 9 clarifications and refusals have no feature
-  vector. All 10 stay in the accuracy report above.
-- **Model:** logistic regression (scikit-learn, L2, `C=1.0`) on the 13-feature vector from
-  `confidence.encode`. `C` was fixed before fitting. With 184 rows, tuning it on the outer folds would leak.
+- **Fitting set: 183 rows** (79 correct, 104 wrong): every row with a feature vector. The 10 declines and date_05's
+  clarification have no feature vector and stay in the accuracy report. Ambiguous and unanswerable items are never
+  fitted. Their label records whether the pipeline declined, not whether an answer was right.
+- **All 104 wrong rows are mutations.** The run's only wrong generated answer (date_05) is a clarification, so it
+  has no score. The fit contains no organic model error.
+- **Model:** logistic regression (scikit-learn, L2, `C=1.0`) on the 13-feature vector from `confidence.encode`.
+  `C` was fixed before fitting.
 - **Validation:** `GroupKFold`, 5 folds, grouped by golden question id (40 groups). A question's golden SQL, its
   mutations and its generated answer always land in the same fold. Every metric for a fitted model is
-  **out-of-fold**. The v0 weights were never fitted, so they are scored on the same 184 rows as they stand.
-- **Features that never fired.** `sanity_fail`, `sanity_info` and `alignment_missing` are zero on every fitting
-  row. The fit has no evidence for them and gives them weight 0, which would switch those signals off at runtime.
-  They keep their v0 weights instead. That leaves every fitted coefficient and every out-of-fold score unchanged,
-  because the feature is zero on all of those rows.
+  **out-of-fold**. The v0 hand-set weights were never fitted, so they are scored as they stand.
+- **Features that never fired.** `sanity_fail`, `sanity_info` and `alignment_missing` are zero on every fitting row
+  and keep their v0 weights (see `evals/calibrate.py`).
 
 ### With or without self-confidence
 
-| variant | OOF Brier | ECE | AUROC | self-confidence weight |
-|---|---|---|---|---|
-| with self-confidence | 0.05300 | 0.0728 | 0.958 | +0.21 |
-| **without self-confidence (chosen)** | 0.05310 | 0.0730 | 0.957 | 0 |
+| variant | OOF Brier | ECE | AUROC |
+|---|---|---|---|
+| with self-confidence | 0.04091 | 0.0638 | 0.984 |
+| **without self-confidence (chosen)** | 0.04096 | 0.0639 | 0.983 |
 
-The variant with self-confidence is better by **0.0001** Brier, and that gain comes from the shortcut.
-Self-confidence is the injected 0.9 on all 144 mutation and golden rows. It varies only on the 40 generated
-rows, and 39 of those are correct. A value other than 0.9 therefore means "generated row, almost certainly
-correct". Grouping by question doesn't block this, because the shortcut works across populations, not across
-questions. So the out-of-fold comparison is tilted toward the variant that has the shortcut.
-
-The rule in `evals/calibrate.py` keeps self-confidence only if it improves out-of-fold Brier by more than
-`MIN_BRIER_GAIN = 0.005`, about a tenth of the score. That threshold was set after seeing the margin, so it is
-a judgement call. It is not a pre-registered rule. Adding self-confidence back needs a run where it varies on
-wrong answers too, for example generated answers to harder questions.
+Self-confidence is the injected 0.9 on all 144 mutation and golden rows. It varies only on generated rows, and every
+one of those is correct, so it can only act as a "this is a generated row" shortcut. It gains 0.00005 Brier, well
+below `MIN_BRIER_GAIN = 0.005`, so it stays out. That threshold was set after the first run. It is a judgement call,
+not a pre-registered rule.
 
 ### Fitted weights (logit space)
 
 | feature | v0 hand-set | calibrated |
 |---|---|---|
-| bias | −1.00 | −0.40 |
+| bias | −1.00 | +0.51 |
 | self_confidence | +1.50 | 0 (dropped) |
-| alignment_centered | +3.00 | +2.02 |
+| alignment_centered | +3.00 | +1.77 |
 | alignment_missing | −0.30 | −0.30 (v0, never fired) |
-| discrepancy_count | −0.50 | −0.42 |
+| discrepancy_count | −0.50 | −1.12 |
 | sanity_fail | −2.00 | −2.00 (v0, never fired) |
-| sanity_warn | −0.70 | −0.66 |
+| sanity_warn | −0.70 | −0.74 |
 | sanity_info | −0.10 | −0.10 (v0, never fired) |
-| agreement_agree | +1.00 | +2.07 |
-| agreement_disagree | −2.00 | −2.33 |
-| agreement_incomparable | −0.30 | −1.25 |
-| guardrail_rewrote | −0.10 | +0.17 |
-| rows_empty | −0.50 | −0.33 (1 row) |
-| rows_capped | −0.30 | −0.30 |
-
-The calibration moved weight from self-confidence onto agreement. An agreeing second query is now worth twice
-what v0 gave it, and "incomparable" is treated as close to a disagreement.
+| agreement_agree | +1.00 | +2.69 |
+| agreement_disagree | −2.00 | −2.24 |
+| agreement_incomparable | −0.30 | −1.30 |
+| guardrail_rewrote | −0.10 | −0.19 |
+| rows_empty | −0.50 | −0.49 |
+| rows_capped | −0.30 | −0.17 |
 
 ## 3. v0 vs calibrated
 
-184 rows. Calibrated numbers are out-of-fold.
+183 rows. Calibrated numbers are out-of-fold.
 
 | scorer | Brier ↓ | ECE (10 bins) ↓ | AUROC ↑ | wrong answers < 0.5 ↑ | correct answers < 0.5 (false flags) ↓ |
 |---|---|---|---|---|---|
-| v0 hand-set | 0.067 | 0.094 | **0.969** | 92.4% (97/105) | **3.8% (3/79)** |
-| calibrated | **0.053** | **0.073** | 0.957 | **97.1% (102/105)** | 5.1% (4/79) |
+| v0 hand-set | 0.051 | 0.099 | **0.987** | 95.2% (99/104) | **5.1% (4/79)** |
+| **calibrated (runtime)** | **0.041** | **0.064** | 0.983 | **97.1% (101/104)** | 7.6% (6/79) |
 
 ![Reliability diagram: v0 vs calibrated vs perfect calibration](calibration.png)
 
-*(The diagram has been redrawn from the merged run, see [Fixed after first eval](#fixed-after-first-eval). The
-numbers in this section are the original fit's.)*
-
-The calibrated score is the better probability: Brier is 20% lower and ECE 22% lower, and at the 0.5 threshold
-it catches 5 more wrong answers. v0 is slightly better at *ranking* (AUROC 0.969 vs 0.957) and raises one fewer
-false flag. The extra false flag is gold:refund_06, at 0.38. Scores are bimodal: 156 of 184 fall below 0.2 or
-above 0.8. The middle bins of the diagram hold 2 to 5 answers each, so their points are noisy. The histogram
-under the diagram shows the counts.
+The calibrated score is the better probability: Brier is 19% lower and ECE 35% lower. It catches 2 more wrong
+answers at 0.5, but it raises 2 more false flags, and v0 ranks slightly better. The 6 calibrated false flags are
+gold:join_02 (0.21), gold:agg_05 (0.23), gold:refund_04 (0.29), gen:lookup_03 (0.23), gen:lookup_06 (0.47) and
+gen:topn_06 (0.04). The 3 missed mutations are mut:lookup_06__literal_case (0.70), mut:join_03__column_swap (0.56)
+and mut:topn_04__fan_out_join (0.67). Scores are bimodal: 152 of 183 fall below 0.2 or above 0.8.
 
 ## 4. Detectors
 
-Share of mutations caught by each detector on its own, and by the calibrated score below 0.5 (out-of-fold).
-Back-translation fires when alignment is below 0.7. Agreement fires on any outcome except "agree". Sanity fires
-on any warn or fail.
+Share of mutations caught by each detector on its own, and by the score below 0.5 (calibrated out-of-fold).
+Back-translation fires when alignment is below 0.7. Agreement fires on any outcome except "agree". Sanity fires on
+any warn or fail.
 
 | mutation | n | back-translation | agreement | sanity | any detector | calibrated < 0.5 | v0 < 0.5 |
 |---|---|---|---|---|---|---|---|
-| fan_out_join | 28 | 29% | 100% | 29% | 100% | 100% | 89% |
-| drop_where | 25 | 72% | 68% | 8% | 92% | 92% | 88% |
-| column_swap | 17 | 88% | 94% | 6% | 100% | 100% | 94% |
+| fan_out_join | 28 | 29% | 100% | 29% | 100% | 96% | 93% |
+| drop_where | 25 | 84% | 76% | 16% | 100% | 100% | 96% |
+| column_swap | 17 | 82% | 94% | 6% | 100% | 94% | 94% |
 | agg_swap | 9 | 78% | 100% | 0% | 100% | 100% | 100% |
 | date_shift | 8 | 100% | 88% | 0% | 100% | 100% | 100% |
-| literal_case | 7 | 0% | 86% | 43% | 100% | 100% | 100% |
+| literal_case | 7 | 14% | 86% | 43% | 100% | 86% | 86% |
 | order_flip | 5 | 100% | 100% | 20% | 100% | 100% | 100% |
 | null_flip | 4 | 100% | 100% | 25% | 100% | 100% | 100% |
-| inner_to_left | 1 | 100% | 100% | 0% | 100% | 100% | 100% |
-| **all mutations** | **104** | **63%** (66) | **89%** (93) | **15%** (16) | **98%** (102) | **98%** (102) | **93%** (97) |
-| generated, wrong (refund_04) | 1 | 0% | 0% | 0% | 0% | 0% | 0% |
-| **false flags on correct answers** | **79** | **2.5%** (2) | **5.1%** (4) | **3.8%** (3) | **11.4%** (9) | **5.1%** (4) | **3.8%** (3) |
+| inner_to_left | 1 | 0% | 100% | 0% | 100% | 100% | 100% |
+| **all mutations** | **104** | **65%** (68) | **91%** (95) | **17%** (18) | **100%** (104) | **97%** (101) | **95%** (99) |
+| **false flags on correct answers** | **79** | **7.6%** (6) | **6.3%** (5) | **3.8%** (3) | **16.5%** (13) | **7.6%** (6) | **5.1%** (4) |
 
-- The detectors complement each other. Back-translation is blind to `literal_case` (0/7), because the question
-  reads the same whichever case the literal is in. Agreement catches 6 of those 7. Agreement is the strongest
-  single detector, and it is the one fan-out joins can't get past (28/28).
-- The calibrated score catches exactly as many mutations as the union of the detectors (102/104), with fewer than
-  half the false flags (4/79 vs 9/79).
-- The 2 mutations nothing catches are both `drop_where` on refund questions (refund_01, refund_04). Dropping the
-  order-status filter gives a query that back-translates to the same question, and that a second query
-  reproduces. It is the same blind spot as the generated refund_04 (see limitations).
+- Every mutation trips at least one detector (104/104). Agreement is still the strongest single detector, and the
+  one fan-out joins can't get past (28/28). Back-translation still can't see `literal_case` (1/7).
+- The judge's 6 false flags include 4 that the glossary caused. See the regression note below.
 
 ## 5. Cost and latency
 
 | population | items | calls | cost | median cost / item | median latency | p90 latency |
 |---|---|---|---|---|---|---|
-| generated (full pipeline) | 50 | 168 | $0.728 | $0.0141 | 9.7 s | 14.9 s |
-| mutation | 104 | 303 | $1.010 | $0.0096 | 6.7 s | 9.0 s |
-| golden | 40 | 115 | $0.368 | $0.0093 | 6.5 s | 9.1 s |
-| **total** | **194** | **586** | **$2.106** | | 7.1 s | |
+| generated (full pipeline) | 50 | 162 | $0.663 | $0.0135 | 10.2 s | 14.1 s |
+| mutation (back-translation + judge) | 104 | 208 | $0.491 | $0.0047 | 4.0 s | 4.8 s |
+| golden (back-translation + judge) | 40 | 80 | $0.182 | $0.0045 | 3.7 s | 4.4 s |
+| **total** | **194** | **450** | **$1.336** | | 4.0 s | |
 
-Costs come from the call ledger `evals/results/live-2026-10-01.llm_calls.jsonl`, and they match the per-row
-totals. The first pass also made 4 unlogged calls (about $0.07), in the unanswerable refusals that failed to
-parse before commit 0ec0b33. True spend was about 590 calls and **about $2.18**. Latency is the wall-clock time of the
-whole pipeline call for an item, API calls and query execution included.
+Costs come from the call ledger `evals/results/full-2026-10-08.llm_calls.jsonl` and match the per-row totals. The
+caps were 480 calls and $1.60, and the run finished every item. Mutation and golden latencies leave out the
+second query, which was reused, so they understate a full `run_answer`. Project spend on evals so far: $2.106
+(`live-2026-10-01`, plus about $0.07 unlogged), $0.283 (`refund-fix-2026-10-08`) and $1.336 (this run).
 
 ## Fixed after first eval
 
-### What changed (2026-10-08)
+### The blind spot
 
-The fix states the business rule. It adds no validator signal. Two places:
+In `live-2026-10-01`, refund_04 ("gross revenue from orders placed in 2025, before refunds") summed every 2025
+order, unpaid `pending` ones included: $6,177,714.13 against the golden $5,791,881.33. Every detector passed it,
+with alignment 1.0, an agreeing second query and no sanity flag, and it scored 0.96 calibrated. Two `drop_where`
+mutations (refund_01, refund_04) passed the same way. All three validators check the SQL against the *question*,
+and none of them knew the *business rule* that unpaid orders aren't revenue.
 
-1. **A metric glossary.** Revenue (gross) = `sum(orders.total_amount)` for
-   `status IN ('paid','shipped','delivered','refunded')`. Pending and cancelled orders are **not** revenue. Net revenue
-   also subtracts `refunds.amount`. The rule is in the schema comment on `orders.total_amount` (`db/init/04_comments.sql`,
-   re-applied to the running database, `COMMENT ON` is idempotent), so it reaches every prompt through the
-   introspected schema. It is also in a new **Glossary** section of the system prompt (`llm/prompt.py`). Unqualified
-   "revenue" is still a gross-or-net judgement call, and "spent" is left undefined, so the ambiguous questions keep
-   their forks. No few-shot example was added.
-2. **A `revenue_status` sanity check** (`validation/sanity.py`, warn). It fires when a revenue or spend total sums
-   `orders.total_amount` and no status filter excludes `pending` and `cancelled`. The flag quotes the glossary rule.
-   It reads the SQL, not the rows, because the rows of a wrong revenue total look like any other number.
+### The fix
 
-### Re-run: `refund-fix-2026-10-08`
-
-Only the refund category went back through the live pipeline: its 6 questions and their 15 mutations, under the new
-prompt and schema. The golden refund SQLs were not re-run.
-
-```bash
-uv run python -m evals.run_eval --live --run-id refund-fix-2026-10-08 --category refund_trap \
-    --population generated --population mutation --max-calls 75 --max-cost 0.50 --concurrency 1
-```
-
-21 items, **69 calls, $0.283** from the ledger `evals/results/refund-fix-2026-10-08.llm_calls.jsonl`, under caps of
-75 calls and $0.50. The dry-run projection was 69 calls (worst case, every step) and $0.25.
-
-The sanity check is deterministic, so `evals.recompute` now also re-derives sanity flags offline. It was applied to
-all 194 rows of `live-2026-10-01` at no cost. It flags exactly 3 rows: gen:refund_04 and the two `drop_where`
-mutations. All 3 are wrong. It flags none of the 80 correct answers.
+1. **A metric glossary** (`llm/glossary.py`). Revenue (gross) = `sum(orders.total_amount)` for
+   `status IN ('paid','shipped','delivered','refunded')`. Pending and cancelled orders are not revenue. Net revenue
+   also subtracts `refunds.amount`. It appears in the schema comment on `orders.total_amount`
+   (`db/init/04_comments.sql`, re-applied in place, since `COMMENT ON` is idempotent) and in the generator's
+   system prompt. Unqualified "revenue" (gross vs net) and "spent" stay open on purpose. No few-shot example was
+   added.
+2. **A `revenue_status` sanity check** (warn). A revenue or spend total that sums `orders.total_amount` without a
+   status filter excluding pending and cancelled is flagged, and the flag quotes the rule.
+3. **The glossary in the alignment judge**, which a correct status filter must not cost points. The judge had never
+   seen the rule. In `refund-fix-2026-10-08` it scored the corrected refund_04 at 0.6 *for* applying it.
 
 ### Before / after
 
-| item | | alignment | agreement | sanity | v0 | calibrated (OOF) | label |
-|---|---|---|---|---|---|---|---|
-| gen:refund_04 | before | 1.0 | agree | — | 0.94 | 0.96 | **wrong**: $6,177,714.13, pending orders included |
-| | after | 0.6 (flagged) | agree | — | 0.76 | 0.88 | **correct**: the golden SQL, status for status |
-| mut:refund_01__drop_where | before | 1.0 | agree | — | 0.94 | 0.94 | wrong, **missed** |
-| | after | 0.4 | disagree | revenue_status | 0.04 | 0.02 | wrong, **caught** by all 3 detectors |
-| mut:refund_04__drop_where | before | 1.0 | agree | — | 0.94 | 0.96 | wrong, **missed** |
-| | after | 1.0 | disagree | revenue_status | 0.28 | 0.10 | wrong, **caught** by agreement and sanity |
+| item | `live-2026-10-01` (no glossary) | `refund-fix-2026-10-08` (glossary in generator) | `full-2026-10-08` (glossary in judge too) |
+|---|---|---|---|
+| gen:refund_04 | **wrong**; alignment 1.0; calibrated 0.96 | correct; alignment **0.6** (flagged) | **correct; alignment 1.0**; calibrated 0.98 |
+| mut:refund_01__drop_where | missed; alignment 1.0, agree; 0.94 | caught; 0.02 | **caught**: alignment 0.4, disagree, revenue_status; 0.03 |
+| mut:refund_04__drop_where | missed; alignment 1.0, agree; 0.96 | caught; 0.10 | **caught**: alignment 0.4, disagree, revenue_status; 0.02 |
+| mut:topn_04__fan_out_join | caught at 0.497 | 0.594 (missed) | **0.67 (missed)**: alignment 1.0, only signal "incomparable" |
+| gen:ambig_01 | clarification | not re-run | **clarification** |
+| gen:ambig_03 | clarification | not re-run | **clarification** |
 
-- **refund_04 is correct.** The model applied the glossary's status filter. Refund generation is now **6/6**
-  (was 5/6).
-- **Both `drop_where` mutations are caught**, by two independent routes. The new sanity check flags them. The second
-  query now applies the glossary on its own, so it disagrees with the mutated SQL. Before the fix it repeated the
-  same mistake and agreed.
-- **The other 13 refund mutations** stay caught under the calibrated score (all below 0.27). Under v0 they are all below
-  0.5 too. mut:refund_06__fan_out_join was a v0 miss before (0.81) and is 0.44 now.
+Calibrated scores are out-of-fold within their own run's fit. `refund-fix-2026-10-08` was scored inside the merged
+set `merged-2026-10-08`, superseded by this run.
 
-### Recalibrated on the merged run
+| fit | Brier ↓ | ECE ↓ | AUROC ↑ | wrong < 0.5 ↑ | false flags ↓ |
+|---|---|---|---|---|---|
+| `live-2026-10-01`, calibrated | 0.053 | 0.073 | 0.957 | 97.1% (102/105) | 5.1% (4/79) |
+| `full-2026-10-08`, calibrated | **0.041** | **0.064** | **0.983** | 97.1% (101/104) | 7.6% (6/79) |
 
-`evals.merge` builds `merged-2026-10-08`: the 194 `live-2026-10-01` rows, with the 21 re-run items replaced by their
-new rows. `evals.calibrate` was refitted on it. Same method, same `C`, same grouped folds.
+These two fits are not like-for-like. The first run's only organic wrong answer with a score was refund_04, which
+is now correct, so every wrong row in the new fit is a mutation. Part of the better Brier and AUROC is that hard row
+leaving.
 
-| fit | scorer | Brier ↓ | ECE ↓ | AUROC ↑ | wrong < 0.5 ↑ | false flags ↓ |
-|---|---|---|---|---|---|---|
-| live-2026-10-01 | v0 hand-set | 0.067 | 0.094 | 0.969 | 92.4% (97/105) | 3.8% (3/79) |
-| live-2026-10-01 | calibrated | 0.053 | 0.073 | 0.957 | 97.1% (102/105) | 5.1% (4/79) |
-| merged-2026-10-08 | v0 hand-set | 0.050 | 0.117 | 0.988 | 96.2% (100/104) | 3.8% (3/80) |
-| merged-2026-10-08 | **calibrated (now at runtime)** | **0.035** | **0.068** | **0.984** | **99.0% (103/104)** | 5.0% (4/80) |
+### What the judge glossary made worse
 
-**These rows are not a like-for-like improvement.** The fitting set changed under the fix. Its only organic wrong
-answer (refund_04) is now correct, so all 104 wrong rows are mutations, and the three rows that scored 0.94–0.96
-while wrong are now resolved. Most of the gain in Brier and AUROC is those three rows. Self-confidence is still dropped
-(gain 0.00004, needs > 0.005). The weights moved modestly. Agreement and discrepancies count for more (agree +2.07 →
-+2.65, discrepancy −0.42 → −0.77), and a sanity warning now costs −0.82 (was −0.66).
+The judge now applies the revenue rule to questions that never say "revenue". 4 of its 6 false flags on correct
+answers are this:
 
-### What the fix made worse, or left open
+| row | question | alignment before → after | judge's discrepancy |
+|---|---|---|---|
+| gold:date_02, gen:date_02 | "total order amount for orders placed in March 2026" | 1.0 / 0.95 → 0.4 | "total order amount … (revenue per glossary)" |
+| gen:topn_03 | "10 largest orders by total amount" | 0.95 → 0.6 | "asks for revenue orders" |
+| gold:agg_07 | line-item revenue after discounts | 0.9 → 0.6 | "includes pending orders" |
 
-- **The alignment judge now false-flags the correct refund_04 (0.6).** Its discrepancy reads: *"original asks for gross
-  revenue from all orders … the query filters to only … paid, shipped, delivered, or refunded"*. The judge compares
-  the question with the back-translation, and it is never shown the schema or the glossary, so it treats the business
-  rule as a deviation. Agreement keeps the score at 0.88, but the detector itself is wrong here. Next fix: give the
-  judge the glossary.
-- **One mutation slipped back over the line.** mut:topn_04__fan_out_join (not a refund item, not re-run) moved from
-  0.497 to 0.594 under the refitted weights. Its only signal is an `incomparable` agreement. It sat on the threshold
-  before, and it now sits just above it.
-- gold:refund_06 is still a calibrated false flag (0.38 → 0.48).
-- **Only the refund category was re-run under the new prompt.** The other 44 generated answers, and every golden
-  and non-refund mutation row, were scored under the old prompt. A glossary in every prompt could change those
-  answers as well (ambig_01 asks about "revenue"), and this run does not measure that. The merged set mixes two
-  prompt versions.
+None of the four scores below 0.5. Agreement and the absence of other flags keep them up. They still lower the
+score, and they make back-translation noisier. The next fix is to scope the judge's rule to questions that use a
+glossary term ("revenue", "net revenue"), which needs another live run of the judge (about 194 calls, roughly
+$0.20).
 
 ## Known limitations
 
-- **refund_04: a business-rule blind spot** *(fixed; see [Fixed after first eval](#fixed-after-first-eval))*. For "gross revenue from orders placed in 2025, before refunds",
-  the model summed every 2025 order, including unpaid `pending` ones: $6,177,714.13 against the golden
-  $5,791,881.33. Every detector passed it: alignment 1.0, the second query made the same choice and agreed,
-  and no sanity flag fired. The answer scores 0.94 under v0 and 0.96 calibrated. Two `drop_where` mutations
-  fail the same way. All three validators check that the SQL matches the *question*. None of them applies the
-  *business rule* that unpaid orders aren't revenue. The schema comment on `orders.status` says
-  `pending=unpaid`, but nothing says gross revenue excludes unpaid orders, so the model has to infer that and it
-  didn't. The fix is a stated revenue definition in the schema comments or the prompt, followed by a fresh run.
-  More validator signal won't catch it.
-- **Two post-hoc relaxations of the golden comparison** (commit 0ec0b33, made after the first pass of this run
-  had been looked at):
+- **The judge's glossary over-reaches** (above): 4 new alignment false flags on non-revenue questions.
+- **date_05 now asks for clarification.** It was answered correctly before, and the stored row doesn't record why.
+- **Reused second queries.** 129 of the 144 mutation and golden rows carry a second query generated under the
+  pre-glossary prompt (see [The run](#the-run)). Agreement on those rows reflects that older generator.
+- **Two post-hoc relaxations of the golden comparison** (commit 0ec0b33, made after the first pass of
+  `live-2026-10-01` had been looked at):
   - **join_06** (`compare_columns: [product, category]`): the golden query also returns `order_item_id`, which
-    the question doesn't ask for. Only the product and category columns must match.
-  - **agg_05** (`null_label_ok: true`): the model returned the auto-approved group as
-    `COALESCE(approved_by, 'auto-approved')` instead of NULL. A NULL group may now come back under one
-    consistent label.
+    the question doesn't ask for.
+  - **agg_05** (`null_label_ok: true`): a NULL group may come back under one consistent label, such as
+    `COALESCE(approved_by, 'auto-approved')`.
 
-  Both were judged as answering the question as asked. Both still loosen the comparison after the results were
-  seen, so the generated accuracy above depends on them. Without them, join and aggregation would be 6/7 each.
-  (The same commit's general rule, that a generated answer may add columns if it contains every golden column,
-  relabelled 12 more answers. It applies to every question, so it isn't counted as a question-specific relaxation.)
-- **Self-confidence is untested as a signal.** It was dropped because this run can't measure it fairly, not
-  because it was shown to carry no information (see section 2).
-- **Small, synthetic negatives.** 104 of the 105 wrong answers in the fitting set are mutations:
-  known, mechanical error types. Real model errors look like refund_04 (plausible, consistent and
-  silent), and this run has one of them. The calibrated probabilities describe this mix. Expect them to be
-  overconfident on real traffic until a run with more organic errors is labelled.
+  Both still decide this run. Under strict comparison, both generated answers disagree with the golden result, and
+  join and aggregation would each be 6/7. (The general rule that a generated answer may add columns, if it
+  contains every golden column, applies to every question and isn't counted as question-specific.)
+- **No organic errors in the fit.** All 104 wrong rows are mutations: known, mechanical error types. Real model
+  errors look like refund_04 did: plausible, consistent and silent. Expect the calibrated probabilities to be
+  overconfident on real traffic until a run with organic errors is labelled.
+- **Self-confidence is untested as a signal.** It was dropped because this run can't measure it fairly. Nothing
+  has shown it carries no information.
 - **Never-fired features.** `sanity_fail`, `sanity_info` and `alignment_missing` keep hand-set weights.
-  `rows_empty` is fitted from a single row.
-- **unans_01 counts as a correct decline** under the harness's self-confidence rule, but the pipeline did return
-  a stand-in answer (see section 1).
 - **One run, one schema.** 40 golden SQLs, 50 questions and one e-commerce database. The confidence intervals on
   all of the above are wide.

@@ -3,6 +3,7 @@
     uv run python -m evals.run_eval                       # dry run, fake client, no spend
     uv run python -m evals.run_eval --live --run-id ID    # real API; re-run the same ID to resume
     uv run python -m evals.run_eval --live --run-id ID --category refund_trap --population generated --population mutation
+    uv run python -m evals.run_eval --live --run-id ID --reuse-second-sql BASE   # see "Reusing second queries"
 
 Three populations, interleaved so a run stopped early still has all three:
 
@@ -25,6 +26,17 @@ specific than the question: `compare_columns` (only these golden columns must
 appear -- e.g. not the arbitrary row id chosen to identify a line item) and
 `null_label_ok` (a NULL group may come back under a consistent label, e.g.
 COALESCE(approved_by, 'auto-approved')).
+
+Reusing second queries (--reuse-second-sql BASE)
+  The mutation and golden SQL never changes, and neither, for a given SQL, does
+  the second query much matter to a judge or prompt change -- yet it is the
+  most expensive step. With this flag those items re-run back-translation and
+  the judge only, and copy the second query (and everything not derived from
+  an API call) from BASE's corrected rows; evals.recompute then re-executes
+  that second query and re-derives agreement, sanity and labels offline.
+  Generated items always run the full pipeline. Each row records
+  `prompt_version` (queryguard.prompt_version) and, when reused,
+  `second_sql_from`.
 
 Spending guards
 - Every API call is logged to evals/results/<run_id>.llm_calls.jsonl (the
@@ -66,15 +78,24 @@ from evals.common import EVALS_DIR, GOLDEN_RESULTS, MUTATION_RESULTS, load_golde
 from queryguard.generate import Ambiguity, CannotAnswer, ClarificationNeeded, GeneratedSQL, Interpretation
 from queryguard.llm.client import DEFAULT_MODEL, LLMClient, RequestCapExceeded, estimate_cost_usd
 from queryguard.pipeline import PipelineResult, run_answer, run_question
+from queryguard.prompt_version import prompt_version
 from queryguard.schema.introspect import load_schema
 from queryguard.validation.agreement import AGREE, compare_results
-from queryguard.validation.backtranslate import VALIDATION_MODEL, AlignmentJudgement, BackTranslation
+from queryguard.validation.backtranslate import (
+    VALIDATION_MODEL,
+    AlignmentJudgement,
+    BackTranslation,
+    back_translate,
+    judge_alignment,
+)
+from queryguard.validation.confidence import V0_WEIGHTS, Features, score
 
 RESULTS_DIR = EVALS_DIR / "results"
 CALL_LOG = EVALS_DIR.parent / "logs" / "llm_calls.jsonl"
 
 GENERATED, MUTATION, GOLDEN = "generated", "mutation", "golden"
 MAX_CALLS_PER_ITEM = {GENERATED: 4, MUTATION: 3, GOLDEN: 3}
+REJUDGE_STEPS = ("back_translate", "judge")
 
 DEFAULT_MAX_CALLS = 600
 DEFAULT_MAX_COST_USD = 4.00
@@ -225,8 +246,11 @@ class BudgetExhausted(RequestCapExceeded):
 class Budget:
     """Ledger-backed caps, with reservations for items in flight."""
 
-    def __init__(self, ledger: Path, max_calls: int, max_cost: float, profile: dict) -> None:
+    def __init__(
+        self, ledger: Path, max_calls: int, max_cost: float, profile: dict, reuse_second_sql: bool = False
+    ) -> None:
         self.ledger = ledger
+        self.reuse_second_sql = reuse_second_sql
         self.max_calls = max_calls
         self.max_cost = max_cost
         self.step_max_cost = {s: profile[s]["max_cost"] for s in STEPS}
@@ -245,8 +269,11 @@ class Budget:
         return calls, cost
 
     def worst_case(self, population: str) -> tuple[int, float]:
-        steps = STEPS if population == GENERATED else STEPS[1:]
-        return MAX_CALLS_PER_ITEM[population], sum(self.step_max_cost[s] for s in steps)
+        if population == GENERATED:
+            steps = STEPS
+        else:
+            steps = REJUDGE_STEPS if self.reuse_second_sql else STEPS[1:]
+        return len(steps), sum(self.step_max_cost[s] for s in steps)
 
     def reserve(self, population: str) -> tuple[int, float] | None:
         """Hold an item's worst case, or None if it could breach a cap."""
@@ -296,8 +323,13 @@ class RecordingClient(LLMClient):
         self._budget.check_call()
         result = super().complete(system_blocks, user_message, output_format, **kwargs)
         usage = result.usage
+        step = _step_of(output_format, user_message)
+        record = {}
+        if step == "back_translate":  # the judge's input; the pipeline result keeps only the question
+            record["output"] = {"question": result.parsed.question, "details": list(result.parsed.details)}
         self._record.append({
-            "step": _step_of(output_format, user_message),
+            **record,
+            "step": step,
             "model": self.model,
             "cost_usd": result.cost_usd,
             "latency_ms": result.latency_ms,
@@ -468,13 +500,58 @@ class Context:
     frames: dict
     results_path: Path
     write_lock: threading.Lock = field(default_factory=threading.Lock)
+    prompt_version: str = ""
+    reuse: dict[str, dict] | None = None  # id -> base corrected row, with --reuse-second-sql
 
 
 class TransientFailure(Exception):
     pass
 
 
+def rejudge_item(item: Item, ctx: Context) -> dict:
+    """Back-translation and judge only; the second query comes from the base row."""
+    base = json.loads(json.dumps(ctx.reuse[item.id]))
+    if base["sql"].strip() != item.sql.strip():
+        raise ValueError(f"{item.id}: base row ran different SQL")
+    calls: list[dict] = []
+    validation_client = RecordingClient(ctx.sdk, VALIDATION_MODEL, ctx.budget, calls)
+    started = time.perf_counter()
+    alignment, discrepancies, back_translation, errors = None, [], None, []
+    try:
+        translated, _ = back_translate(item.sql, client=validation_client, schema=ctx.schema)
+        back_translation = translated.question
+        judgement, _ = judge_alignment(item.question, translated, client=validation_client)
+        alignment, discrepancies = judgement.alignment, list(judgement.discrepancies)
+    except BudgetExhausted:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the pipeline records a failed validation step the same way
+        if type(exc).__name__ in TRANSIENT:
+            raise TransientFailure(f"{type(exc).__name__}: {exc}") from exc
+        errors.append(f"alignment: {type(exc).__name__}: {exc}")
+
+    features = {**base["features"], "alignment": alignment, "discrepancy_count": len(discrepancies)}
+    confidence, breakdown = score(Features(**features), V0_WEIGHTS)
+    base["detectors"]["alignment"] = {
+        "score": alignment, "discrepancies": discrepancies, "back_translation": back_translation,
+        "flagged": alignment is not None and alignment < ALIGNMENT_FLAG_BELOW,
+    }
+    for stale in ("corrections", "source_run"):
+        base.pop(stale, None)
+    base.update(
+        run_id=ctx.run_id, dry_run=ctx.dry_run, finished_at=datetime.now(timezone.utc).isoformat(),
+        features=features, confidence=confidence, confidence_breakdown=breakdown,
+        validation_errors=errors, calls=calls, n_calls=len(calls),
+        cost_usd=round(sum(c["cost_usd"] for c in calls), 6),
+        latency_ms=int((time.perf_counter() - started) * 1000),
+        prompt_version=ctx.prompt_version,
+        second_sql_from=ctx.reuse[item.id].get("source_run") or ctx.reuse[item.id]["run_id"],
+    )
+    return base
+
+
 def run_item(item: Item, ctx: Context) -> dict:
+    if ctx.reuse is not None and item.population != GENERATED:
+        return rejudge_item(item, ctx)
     calls: list[dict] = []
     client = RecordingClient(ctx.sdk, DEFAULT_MODEL, ctx.budget, calls)
     validation_client = RecordingClient(ctx.sdk, VALIDATION_MODEL, ctx.budget, calls)
@@ -527,6 +604,7 @@ def run_item(item: Item, ctx: Context) -> dict:
         "n_calls": len(calls),
         "cost_usd": round(sum(c["cost_usd"] for c in calls), 6),
         "latency_ms": latency_ms,
+        "prompt_version": ctx.prompt_version,
     }
 
 
@@ -669,6 +747,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--category", action="append", help="only this golden category (repeatable)")
     parser.add_argument("--population", action="append", choices=(GENERATED, MUTATION, GOLDEN),
                         help="only this population (repeatable)")
+    parser.add_argument("--reuse-second-sql", metavar="BASE",
+                        help="mutation/golden items: re-run back-translation and judge only, second query from BASE")
     args = parser.parse_args(argv)
 
     if args.live and not args.run_id:
@@ -695,7 +775,7 @@ def main(argv: list[str] | None = None) -> int:
 
     logging.getLogger("queryguard.llm.client").addFilter(_DropHaikuCacheFloorWarning())
     profile = token_profile()
-    budget = Budget(ledger, args.max_calls, args.max_cost, profile)
+    budget = Budget(ledger, args.max_calls, args.max_cost, profile, reuse_second_sql=bool(args.reuse_second_sql))
     if dry_run:
         sdk = FakeSDK(profile)
     else:
@@ -710,9 +790,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.category and not items:
         parser.error(f"no items in categories {args.category}")
     items = items[: args.limit] if args.limit else items
-    ctx = Context(run_id, dry_run, sdk, budget, load_schema(), golden_frames(), results_path)
-    print(f"{'DRY RUN' if dry_run else 'LIVE'} {run_id}: {len(items)} items, "
-          f"{len(finished_ids(results_path))} already finished")
+    schema = load_schema()
+    reuse = None
+    if args.reuse_second_sql:
+        base_path = RESULTS_DIR / f"{args.reuse_second_sql}.corrected.jsonl"
+        reuse = {r["id"]: r for r in map(json.loads, base_path.read_text(encoding="utf-8").splitlines()) if r}
+        missing = [i.id for i in items if i.population != GENERATED and i.id not in reuse]
+        if missing:
+            parser.error(f"{len(missing)} items have no row in {base_path.name}, e.g. {missing[0]}")
+    ctx = Context(run_id, dry_run, sdk, budget, schema, golden_frames(), results_path,
+                  prompt_version=prompt_version(schema), reuse=reuse)
+    print(f"{'DRY RUN' if dry_run else 'LIVE'} {run_id} ({ctx.prompt_version}): {len(items)} items, "
+          f"{len(finished_ids(results_path))} already finished"
+          + (f"; second queries reused from {args.reuse_second_sql}" if reuse else ""))
     stop_reason = run(items, ctx, args.concurrency)
     unfinished = sorted({i.id for i in items} - finished_ids(results_path))
     stop_reason, exit_code = final_status(stop_reason, unfinished)

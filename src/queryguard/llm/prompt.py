@@ -22,6 +22,7 @@ from __future__ import annotations
 from typing import Any
 
 from queryguard.llm.examples import render_examples
+from queryguard.llm.glossary import GLOSSARY
 from queryguard.schema.introspect import DatabaseSchema, load_schema
 
 SYSTEM_INSTRUCTIONS = """\
@@ -55,13 +56,7 @@ Rules:
   as asked: 1.0 only when the question is unambiguous and fully covered by the
   schema; below 0.5 when you had to guess at intent.
 
-Glossary (fixed business definitions; they override any reading of your own):
-- Revenue, also called gross revenue: sum(orders.total_amount) over orders
-  with status IN ('paid', 'shipped', 'delivered', 'refunded'). Pending orders
-  are unpaid and cancelled orders were voided: neither is revenue, whatever
-  date range or other filter the question adds. Refunded orders still count
-  toward gross revenue.
-- Net revenue: gross revenue minus refunds.amount on those same orders.
+{glossary}
 - Whether an unqualified "revenue" means gross or net is still a judgement
   call (see Ambiguity); the status rule applies to both readings.
 
@@ -89,7 +84,7 @@ Ambiguity:
   use `explanation` to name the term that is ambiguous and why. Every rule
   above still applies to the SQL inside each interpretation.
 - When `is_ambiguous` is false, leave `interpretations` empty and answer with
-  `sql` as usual."""
+  `sql` as usual.""".replace("{glossary}", GLOSSARY)
 
 
 def build_system_blocks(schema: DatabaseSchema | None = None) -> list[dict[str, Any]]:
