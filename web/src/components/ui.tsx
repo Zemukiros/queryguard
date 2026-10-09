@@ -10,7 +10,7 @@ export function Panel({ title, aside, children, className, id }: {
       className={cx("rounded-lg border border-line bg-surface", className)}>
       {title !== undefined && (
         <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 border-b border-line px-3.5 py-2">
-          <h2 id={id ? `${id}-title` : undefined} className="qg-label text-ink-2">{title}</h2>
+          <h2 id={id ? `${id}-title` : undefined} className="text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-2">{title}</h2>
           {aside}
         </header>
       )}
@@ -27,7 +27,7 @@ const TONE: Record<Tone, string> = {
   fail: "bg-fail-soft text-fail",
   info: "bg-info-soft text-info",
   neutral: "bg-surface-2 text-ink-2",
-  accent: "bg-accent-soft text-accent-strong",
+  accent: "bg-accent-soft text-accent",
 };
 
 export function Chip({ tone = "neutral", children, className }: { tone?: Tone; children: ReactNode; className?: string }) {

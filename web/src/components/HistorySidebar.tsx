@@ -14,7 +14,7 @@ export function HistorySidebar({ activeId, onOpen }: { activeId: string | null; 
   const history = useQuery({ queryKey: ["history"], queryFn: () => api.history(40) });
   return (
     <nav aria-label="Your recent questions" className="flex min-h-0 flex-col">
-      <h2 className="qg-label px-1 pb-2 text-ink-2">Your history</h2>
+      <h2 className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-ink-2">Your history</h2>
       {history.isPending && <p className="px-1 text-[12px] text-ink-3">Loading…</p>}
       {history.isError && <p className="px-1 text-[12px] text-ink-3">History is unavailable.</p>}
       {history.data?.length === 0 && <p className="px-1 text-[12px] text-ink-3">Questions you ask appear here. Only you can see them.</p>}

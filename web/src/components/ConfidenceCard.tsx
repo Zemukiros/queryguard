@@ -7,7 +7,7 @@ type Contribution = Schemas["Contribution"];
 
 
 /**
- * A diverging bar per signal: green raises the score, amber lowers it, scaled
+ * A diverging bar per signal: blue raises the score, orange lowers it, scaled
  * to the largest term. The baseline (the intercept) is a starting point, not a
  * signal, so it is stated above the bars instead of drawn as one.
  */
