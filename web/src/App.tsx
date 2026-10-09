@@ -84,7 +84,7 @@ export default function App() {
           {result && (
             <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-line bg-surface px-3.5 py-2.5" data-testid="result-header">
               <div className="min-w-0 basis-full sm:flex-1 sm:basis-auto">
-                <p className="font-serif text-[19px] leading-snug font-normal text-ink">{result.question}</p>
+                <p className="text-[14px] font-medium text-ink">{result.question}</p>
                 {scalar !== undefined && (
                   <p className="mt-0.5 text-[13px] text-ink-2" data-testid="answer">
                     <span className="font-mono text-[18px] font-semibold tabular-nums text-ink">{formatCell(scalar)}</span>
@@ -98,7 +98,7 @@ export default function App() {
               </span>
               {result.cached && <Chip tone="accent">cached</Chip>}
               {result.mode === "demo" && result.mode_reason && (
-                <span data-testid="simulated" title={modeCopy(result.mode_reason).detail}><Chip tone="warn">simulated model</Chip></span>
+                <span data-testid="simulated" title={modeCopy(result.mode_reason).detail}><Chip tone="info">simulated model</Chip></span>
               )}
               <div className="basis-full"><FeedbackControls key={result.query_id} queryId={result.query_id} /></div>
             </div>

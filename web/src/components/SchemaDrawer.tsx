@@ -26,11 +26,11 @@ export function SchemaDrawer({ open, onClose }: { open: boolean; onClose: () => 
 
   return (
     <dialog ref={dialog} onClose={onClose} aria-labelledby="schema-title"
-      className="m-0 ml-auto h-dvh max-h-dvh w-full max-w-[520px] border-l border-line bg-surface p-0 text-ink backdrop:bg-scrim">
+      className="m-0 ml-auto h-dvh max-h-dvh w-full max-w-[520px] border-l border-line bg-surface p-0 text-ink backdrop:bg-black/60">
       <div className="flex h-full flex-col">
         <header className="flex items-center justify-between gap-2 border-b border-line px-4 py-3">
           <div>
-            <h2 id="schema-title" className="font-serif text-[20px] font-normal">Database schema</h2>
+            <h2 id="schema-title" className="text-[14px] font-semibold">Database schema</h2>
             <p className="text-[12px] text-ink-2">Exactly what the model sees. Read-only.</p>
           </div>
           <Button variant="ghost" onClick={onClose} aria-label="Close schema"><Cross size={16} /></Button>
