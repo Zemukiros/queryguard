@@ -54,7 +54,7 @@ export function VerificationPanel({ result }: { result: QueryResult }) {
               </div>
               {result.second_sql && result.sql && (
                 <details className="mt-2">
-                  <summary className="cursor-pointer text-[12px] text-accent">Compare the two queries</summary>
+                  <summary className="cursor-pointer text-[12px] text-accent-strong">Compare the two queries</summary>
                   <div className="mt-1.5">
                     <SqlDiff before={result.sql} after={result.second_sql} beforeLabel="first query" afterLabel="second query" />
                   </div>

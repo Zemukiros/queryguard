@@ -8,7 +8,7 @@ const out = new URL("../../docs/img/pipeline.png", import.meta.url).pathname;
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, deviceScaleFactor: 2 });
 await page.goto(base);
-await page.getByTestId("fake-badge").waitFor();
+await page.getByTestId("mode-badge").waitFor();
 await page.locator("#question").fill("What was gross revenue from orders placed in 2025, before refunds?");
 await page.getByRole("button", { name: "Ask", exact: true }).click();
 await page.locator("[data-testid=timeline] [data-stage=done][data-state=done]").waitFor({ timeout: 30_000 });
