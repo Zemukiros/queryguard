@@ -1,123 +1,160 @@
 @import "tailwindcss";
 
 /*
- * QueryGuard tokens. Light is the default; dark applies with the OS setting
- * unless the user chose light, or whenever they chose dark. Status colours
- * (ok / warn / fail / info) are reserved for check outcomes and always sit
- * next to a text label. The two "signal" hues are for the diverging
- * confidence bar: raises (blue) vs lowers (orange).
+ * QueryGuard tokens: "Paper & Field", the portfolio's design system
+ * (~/projects/portfolio/DESIGN.md + src/app/globals.css). The --pf-* palette is
+ * copied from it verbatim; every semantic token below is one of those values
+ * or a color-mix of them, so no colour exists here that the portfolio lacks.
+ * The portfolio is light only; the dark scheme inverts paper and ink and
+ * lightens the same hues until text passes WCAG AA.
+ *
+ * One green accent for chrome (buttons, focus, links, active stage, raises
+ * trust). Status colours keep their meaning and always sit next to a label:
+ * ok = mint, warn = amber (lowers trust, rate limit, demo mode), fail = rose
+ * (guardrail rejection, errors), info = cyan.
+ *
+ * Light is the default; dark applies with the OS setting unless the user
+ * chose light, or whenever they chose dark.
  */
 :root {
+  --pf-bg: #f4f2ea;
+  --pf-bg-raised: #efece2;
+  --pf-bg-panel: #e7e3d6;
+  --pf-border: #dcd8ca;
+  --pf-border-strong: #c4bfae;
+  --pf-ink: #18211a;
+  --pf-ink-dim: #485148;
+  --pf-ink-faint: #5a6258;
+  --pf-accent: #2f6a3b;
+  --pf-accent-strong: #285d33;
+  --pf-accent-deep: #1f4a29;
+  --pf-amber: #8a5f17;
+  --pf-rose: #a8325a;
+  --pf-cyan: #1b6b7b;
+  --pf-mint: #237049;
+  --pf-window: #fbfaf5;
+  --pf-heat-1: #c9d8bf;
+  --pf-heat-2: #8fb184;
+  --pf-white: #ffffff;
+
   color-scheme: light;
-  --bg: #f6f7f9;
-  --surface: #ffffff;
-  --surface-2: #f1f3f6;
-  --surface-3: #e8ebf0;
-  --border: #e1e4ea;
-  --border-strong: #c9cfd8;
-  --ink: #0f172a;
-  --ink-2: #44506a;
-  --ink-3: #5f6b80;
-  --accent: #4f46e5;
-  --accent-ink: #ffffff;
-  --accent-soft: #eef0ff;
-  --accent-fill: #4f46e5;
-  --accent-fill-ink: #ffffff;
-  --rail: #aab2be;
-  --ok: #157a3c;
-  --ok-soft: #e8f6ed;
-  --warn: #9a5b05;
-  --warn-soft: #fdf3e2;
-  --fail: #b42318;
-  --fail-soft: #fdecea;
-  --info: #0b6aa2;
-  --info-soft: #e6f3fb;
-  --raise: #2a78d6;
-  --lower: #d9581f;
-  --diff-add: #e3f6e9;
-  --diff-del: #fde8e7;
-  --code-keyword: #5b3fd6;
-  --code-string: #0f7a52;
-  --code-number: #a35a00;
-  --code-comment: #6b7487;
-  --code-fn: #0b6aa2;
-  --code-op: #44506a;
+  --bg: var(--pf-bg);
+  --surface: var(--pf-window);
+  --surface-2: var(--pf-bg-raised);
+  --surface-3: var(--pf-bg-panel);
+  --border: var(--pf-border);
+  --border-strong: var(--pf-border-strong);
+  --ink: var(--pf-ink);
+  --ink-2: var(--pf-ink-dim);
+  --ink-3: var(--pf-ink-faint);
+  --accent: var(--pf-accent);
+  --accent-strong: var(--pf-accent-strong);
+  --accent-soft: color-mix(in srgb, var(--pf-accent) 10%, var(--pf-window));
+  --accent-fill: var(--pf-accent-deep);
+  --accent-fill-ink: var(--pf-white);
+  --rail: var(--pf-border-strong);
+  --ok: var(--pf-mint);
+  --ok-soft: color-mix(in srgb, var(--pf-mint) 10%, var(--pf-window));
+  --warn: var(--pf-amber);
+  --warn-soft: color-mix(in srgb, var(--pf-amber) 10%, var(--pf-window));
+  --fail: var(--pf-rose);
+  --fail-soft: color-mix(in srgb, var(--pf-rose) 10%, var(--pf-window));
+  --info: var(--pf-cyan);
+  --info-soft: color-mix(in srgb, var(--pf-cyan) 10%, var(--pf-window));
+  --raise: var(--pf-accent);
+  --lower: var(--pf-amber);
+  --diff-add: color-mix(in srgb, var(--pf-mint) 12%, var(--pf-window));
+  --diff-del: color-mix(in srgb, var(--pf-rose) 12%, var(--pf-window));
+  --scrim: color-mix(in srgb, var(--pf-ink) 35%, transparent);
+  --selection: color-mix(in srgb, var(--pf-accent) 22%, transparent);
+  --code-keyword: var(--pf-accent-strong);
+  --code-string: var(--pf-cyan);
+  --code-number: var(--pf-amber);
+  --code-comment: var(--pf-ink-faint);
+  --code-fn: var(--pf-cyan);
+  --code-op: var(--pf-ink-dim);
 }
 
+/* Dark: ink becomes the ground, paper the type; hues are lightened towards paper. */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
-    --bg: #0b0e14;
-    --surface: #11151d;
-    --surface-2: #171c26;
-    --surface-3: #1f2532;
-    --border: #252c3a;
-    --border-strong: #343d4f;
-    --ink: #e6e9ef;
-    --ink-2: #b0b8c6;
-    --ink-3: #8a94a6;
-    --accent: #8b93ff;
-    --accent-ink: #0b0e14;
-    --accent-soft: #1e2142;
-    --accent-fill: #5452e6;
-    --accent-fill-ink: #ffffff;
-    --rail: #465063;
-    --ok: #4cc77a;
-    --ok-soft: #10261a;
-    --warn: #f0b445;
-    --warn-soft: #2a2010;
-    --fail: #ff7b70;
-    --fail-soft: #2d1513;
-    --info: #5cb8f0;
-    --info-soft: #0e2231;
-    --raise: #4f9be8;
-    --lower: #f07a43;
-    --diff-add: #12301f;
-    --diff-del: #3a1715;
-    --code-keyword: #a99bff;
-    --code-string: #5fd0a0;
-    --code-number: #f2b866;
-    --code-comment: #7d879a;
-    --code-fn: #6cc2f2;
-    --code-op: #b0b8c6;
+    --bg: var(--pf-ink);
+    --surface: color-mix(in srgb, var(--pf-bg) 4%, var(--pf-ink));
+    --surface-2: color-mix(in srgb, var(--pf-bg) 8%, var(--pf-ink));
+    --surface-3: color-mix(in srgb, var(--pf-bg) 12%, var(--pf-ink));
+    --border: color-mix(in srgb, var(--pf-bg) 14%, var(--pf-ink));
+    --border-strong: color-mix(in srgb, var(--pf-bg) 26%, var(--pf-ink));
+    --ink: var(--pf-bg);
+    --ink-2: color-mix(in srgb, var(--pf-bg) 78%, var(--pf-ink));
+    --ink-3: color-mix(in srgb, var(--pf-bg) 64%, var(--pf-ink));
+    --accent: var(--pf-heat-2);
+    --accent-strong: color-mix(in srgb, var(--pf-heat-2) 60%, var(--pf-heat-1));
+    --accent-soft: color-mix(in srgb, var(--pf-accent) 28%, var(--pf-ink));
+    --accent-fill: var(--pf-heat-2);
+    --accent-fill-ink: var(--pf-ink);
+    --rail: color-mix(in srgb, var(--pf-bg) 26%, var(--pf-ink));
+    --ok: color-mix(in srgb, var(--pf-mint) 55%, var(--pf-bg));
+    --ok-soft: color-mix(in srgb, var(--pf-mint) 22%, var(--pf-ink));
+    --warn: color-mix(in srgb, var(--pf-amber) 55%, var(--pf-bg));
+    --warn-soft: color-mix(in srgb, var(--pf-amber) 22%, var(--pf-ink));
+    --fail: color-mix(in srgb, var(--pf-rose) 55%, var(--pf-bg));
+    --fail-soft: color-mix(in srgb, var(--pf-rose) 22%, var(--pf-ink));
+    --info: color-mix(in srgb, var(--pf-cyan) 55%, var(--pf-bg));
+    --info-soft: color-mix(in srgb, var(--pf-cyan) 22%, var(--pf-ink));
+    --raise: var(--pf-heat-2);
+    --lower: color-mix(in srgb, var(--pf-amber) 60%, var(--pf-bg));
+    --diff-add: color-mix(in srgb, var(--pf-mint) 22%, var(--pf-ink));
+    --diff-del: color-mix(in srgb, var(--pf-rose) 22%, var(--pf-ink));
+    --scrim: color-mix(in srgb, var(--pf-ink) 70%, transparent);
+    --selection: color-mix(in srgb, var(--pf-heat-2) 30%, transparent);
+    --code-keyword: color-mix(in srgb, var(--pf-heat-2) 60%, var(--pf-heat-1));
+    --code-string: color-mix(in srgb, var(--pf-cyan) 55%, var(--pf-bg));
+    --code-number: color-mix(in srgb, var(--pf-amber) 55%, var(--pf-bg));
+    --code-comment: color-mix(in srgb, var(--pf-bg) 64%, var(--pf-ink));
+    --code-fn: color-mix(in srgb, var(--pf-cyan) 55%, var(--pf-bg));
+    --code-op: color-mix(in srgb, var(--pf-bg) 78%, var(--pf-ink));
   }
 }
 
+/* The same values when the user picks dark with the header toggle. */
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0b0e14;
-  --surface: #11151d;
-  --surface-2: #171c26;
-  --surface-3: #1f2532;
-  --border: #252c3a;
-  --border-strong: #343d4f;
-  --ink: #e6e9ef;
-  --ink-2: #b0b8c6;
-  --ink-3: #8a94a6;
-  --accent: #8b93ff;
-  --accent-ink: #0b0e14;
-  --accent-soft: #1e2142;
-  --accent-fill: #5452e6;
-  --accent-fill-ink: #ffffff;
-  --rail: #465063;
-  --ok: #4cc77a;
-  --ok-soft: #10261a;
-  --warn: #f0b445;
-  --warn-soft: #2a2010;
-  --fail: #ff7b70;
-  --fail-soft: #2d1513;
-  --info: #5cb8f0;
-  --info-soft: #0e2231;
-  --raise: #4f9be8;
-  --lower: #f07a43;
-  --diff-add: #12301f;
-  --diff-del: #3a1715;
-  --code-keyword: #a99bff;
-  --code-string: #5fd0a0;
-  --code-number: #f2b866;
-  --code-comment: #7d879a;
-  --code-fn: #6cc2f2;
-  --code-op: #b0b8c6;
+  --bg: var(--pf-ink);
+  --surface: color-mix(in srgb, var(--pf-bg) 4%, var(--pf-ink));
+  --surface-2: color-mix(in srgb, var(--pf-bg) 8%, var(--pf-ink));
+  --surface-3: color-mix(in srgb, var(--pf-bg) 12%, var(--pf-ink));
+  --border: color-mix(in srgb, var(--pf-bg) 14%, var(--pf-ink));
+  --border-strong: color-mix(in srgb, var(--pf-bg) 26%, var(--pf-ink));
+  --ink: var(--pf-bg);
+  --ink-2: color-mix(in srgb, var(--pf-bg) 78%, var(--pf-ink));
+  --ink-3: color-mix(in srgb, var(--pf-bg) 64%, var(--pf-ink));
+  --accent: var(--pf-heat-2);
+  --accent-strong: color-mix(in srgb, var(--pf-heat-2) 60%, var(--pf-heat-1));
+  --accent-soft: color-mix(in srgb, var(--pf-accent) 28%, var(--pf-ink));
+  --accent-fill: var(--pf-heat-2);
+  --accent-fill-ink: var(--pf-ink);
+  --rail: color-mix(in srgb, var(--pf-bg) 26%, var(--pf-ink));
+  --ok: color-mix(in srgb, var(--pf-mint) 55%, var(--pf-bg));
+  --ok-soft: color-mix(in srgb, var(--pf-mint) 22%, var(--pf-ink));
+  --warn: color-mix(in srgb, var(--pf-amber) 55%, var(--pf-bg));
+  --warn-soft: color-mix(in srgb, var(--pf-amber) 22%, var(--pf-ink));
+  --fail: color-mix(in srgb, var(--pf-rose) 55%, var(--pf-bg));
+  --fail-soft: color-mix(in srgb, var(--pf-rose) 22%, var(--pf-ink));
+  --info: color-mix(in srgb, var(--pf-cyan) 55%, var(--pf-bg));
+  --info-soft: color-mix(in srgb, var(--pf-cyan) 22%, var(--pf-ink));
+  --raise: var(--pf-heat-2);
+  --lower: color-mix(in srgb, var(--pf-amber) 60%, var(--pf-bg));
+  --diff-add: color-mix(in srgb, var(--pf-mint) 22%, var(--pf-ink));
+  --diff-del: color-mix(in srgb, var(--pf-rose) 22%, var(--pf-ink));
+  --scrim: color-mix(in srgb, var(--pf-ink) 70%, transparent);
+  --selection: color-mix(in srgb, var(--pf-heat-2) 30%, transparent);
+  --code-keyword: color-mix(in srgb, var(--pf-heat-2) 60%, var(--pf-heat-1));
+  --code-string: color-mix(in srgb, var(--pf-cyan) 55%, var(--pf-bg));
+  --code-number: color-mix(in srgb, var(--pf-amber) 55%, var(--pf-bg));
+  --code-comment: color-mix(in srgb, var(--pf-bg) 64%, var(--pf-ink));
+  --code-fn: color-mix(in srgb, var(--pf-cyan) 55%, var(--pf-bg));
+  --code-op: color-mix(in srgb, var(--pf-bg) 78%, var(--pf-ink));
 }
 
 @theme inline {
@@ -131,7 +168,7 @@
   --color-ink-2: var(--ink-2);
   --color-ink-3: var(--ink-3);
   --color-accent: var(--accent);
-  --color-accent-ink: var(--accent-ink);
+  --color-accent-strong: var(--accent-strong);
   --color-accent-soft: var(--accent-soft);
   --color-accent-fill: var(--accent-fill);
   --color-accent-fill-ink: var(--accent-fill-ink);
@@ -148,7 +185,9 @@
   --color-lower: var(--lower);
   --color-diff-add: var(--diff-add);
   --color-diff-del: var(--diff-del);
+  --color-scrim: var(--scrim);
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-serif: "Instrument Serif", ui-serif, Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
 }
 
@@ -168,6 +207,19 @@ body {
 :focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+::selection {
+  background: var(--selection);
+}
+
+/* Portfolio "Label": mono, 11px, medium, +0.16em, uppercase. */
+.qg-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
 }
 
 @keyframes qg-pulse {
