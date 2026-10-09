@@ -4,6 +4,9 @@ QueryGuard runs as one Vercel project (Hobby, $0) with two Vercel Services, a Ne
 queried data, and an Upstash Redis (free) holding the API's own state. Production deploys from `main` through
 Vercel's GitHub integration. No deploy token is stored anywhere.
 
+Production: **https://queryguard-livid.vercel.app** (public). Preview and per-deployment URLs stay behind Vercel
+Authentication (Deployment Protection → Standard Protection).
+
 ```
 browser ──► Vercel ──┬─ /v1/*, /healthz, /docs, /openapi.json ──► app  (FastAPI, Python 3.12, Fluid compute)
                      │                                             ├─► Neon     as queryguard_ro (SELECT only)
@@ -44,6 +47,8 @@ Changing an environment variable takes effect on the **next deployment**: redepl
 4. Verify production in demo mode: `/healthz` says `demo` / `switched_off` and a $0.50 ceiling; ask a question.
 5. Production env: `QUERYGUARD_LIVE=1`, then redeploy production.
 6. Verify live: `/healthz` says `live`; one question comes back `mode: live` with a cost; spend shows in the header.
+   Done 2026-10-08: "How many orders were cancelled?" → 178, `mode: live`, 4 calls, $0.0268,
+   recorded in `/healthz` spend.
 7. Kill-switch drill: `QUERYGUARD_LIVE=0`, redeploy, confirm demo mode; then back to `1` and redeploy.
 
 **Emergency stop:** set `QUERYGUARD_LIVE=0` and redeploy, or revoke the Anthropic key. Either is enough on its own.

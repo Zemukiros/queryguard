@@ -9,6 +9,10 @@
 can't write runs it, and three independent checks feed a calibrated probability that the answer is right.
 On the eval set that probability flags 99% of known-wrong queries.
 
+**Live demo: [queryguard-livid.vercel.app](https://queryguard-livid.vercel.app)**. It runs the real model within a
+$0.50 daily spend ceiling. Past that, or with the kill switch off, questions run in demo mode, and the header says
+which mode answered.
+
 ![QueryGuard answering "What was gross revenue from orders placed in 2025, before refunds?": the pipeline timeline, a 0.98 calibrated confidence with its per-signal breakdown, blind back-translation, an agreeing second query, and the SQL](docs/img/pipeline.png)
 
 ## Quickstart
@@ -143,13 +147,14 @@ flowchart LR
   (join_06, agg_05). One question (date_05) now asks for clarification where it used to answer.
   [EVAL_RESULTS.md](docs/EVAL_RESULTS.md#known-limitations) has the details.
 - **Narrow scope.** One synthetic e-commerce schema: 40 golden SQLs and 50 questions. Confidence intervals are
-  wide. Not deployed: it runs locally and in Docker.
+  wide.
 
 ## Stack
 
 Python 3.12 · uv · FastAPI · SQLAlchemy + psycopg 3 · sqlparse · pandas · PostgreSQL 16 · Anthropic SDK
 (Claude Sonnet for SQL, Haiku for validation) · scikit-learn (calibration, offline) · Vite + React +
-TypeScript (strict) · Tailwind v4 · TanStack Query · CodeMirror 6 · Playwright · Docker · GitHub Actions.
+TypeScript (strict) · Tailwind v4 · TanStack Query · CodeMirror 6 · Playwright · Docker · GitHub Actions ·
+Vercel (Services) · Neon Postgres · Upstash Redis ([deployment](docs/DEPLOYMENT.md)).
 
 API types in the UI are generated from the FastAPI OpenAPI schema (`make gen-api`), and CI fails if they drift.
 
