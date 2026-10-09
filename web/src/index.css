@@ -1,8 +1,8 @@
 @import "tailwindcss";
 
 /*
- * QueryGuard tokens. Light is the default; dark applies with the OS setting
- * unless the user chose light, or whenever they chose dark. Status colours
+ * QueryGuard tokens. Light is the default whatever the OS setting; dark
+ * applies only when the visitor picks it with the header toggle. Status colours
  * (ok / warn / fail / info) are reserved for check outcomes and always sit
  * next to a text label. The two "signal" hues are for the diverging
  * confidence bar: raises (blue) vs lowers (orange).
@@ -42,45 +42,6 @@
   --code-comment: #6b7487;
   --code-fn: #0b6aa2;
   --code-op: #44506a;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    color-scheme: dark;
-    --bg: #0b0e14;
-    --surface: #11151d;
-    --surface-2: #171c26;
-    --surface-3: #1f2532;
-    --border: #252c3a;
-    --border-strong: #343d4f;
-    --ink: #e6e9ef;
-    --ink-2: #b0b8c6;
-    --ink-3: #8a94a6;
-    --accent: #8b93ff;
-    --accent-ink: #0b0e14;
-    --accent-soft: #1e2142;
-    --accent-fill: #5452e6;
-    --accent-fill-ink: #ffffff;
-    --rail: #465063;
-    --ok: #4cc77a;
-    --ok-soft: #10261a;
-    --warn: #f0b445;
-    --warn-soft: #2a2010;
-    --fail: #ff7b70;
-    --fail-soft: #2d1513;
-    --info: #5cb8f0;
-    --info-soft: #0e2231;
-    --raise: #4f9be8;
-    --lower: #f07a43;
-    --diff-add: #12301f;
-    --diff-del: #3a1715;
-    --code-keyword: #a99bff;
-    --code-string: #5fd0a0;
-    --code-number: #f2b866;
-    --code-comment: #7d879a;
-    --code-fn: #6cc2f2;
-    --code-op: #b0b8c6;
-  }
 }
 
 :root[data-theme="dark"] {
